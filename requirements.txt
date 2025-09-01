@@ -1,0 +1,6 @@
+# torch==1.7.0+cu110
+# torchvision==0.8.1+cu110
+pandas
+numpy
+Pillow
+scikit_learn
