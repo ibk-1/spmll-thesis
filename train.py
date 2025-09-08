@@ -9,6 +9,19 @@ import models
 from losses import compute_batch_loss
 import datetime
 from instrumentation import train_logger
+import pickle
+
+import torch
+import torch.nn.functional as F
+from ccn.constraints_group import ConstraintsGroup
+from ccn.clauses_group import ClausesGroup
+from ccn.constraints_layer import ConstraintsLayer
+
+def init_constraints_layer(rules_path, num_classes, device):
+    group   = ConstraintsGroup(rules_path)
+    clauses = ClausesGroup.from_constraints_group(group)
+    layer   = ConstraintsLayer.from_clauses_group(clauses, num_classes=num_classes, centrality="katz").to(device)
+    return group, layer
 
 def run_train_phase(model, P, Z, logger, epoch, phase):
     
@@ -35,10 +48,23 @@ def run_train_phase(model, P, Z, logger, epoch, phase):
         Z['optimizer'].zero_grad()
         with torch.set_grad_enabled(True):
             # batch['logits'], batch['label_vec_est'] = model(batch)
+            # inside run_train_phase
+            use_constraints = False
+            if P['train_mode'] == 'end_to_end' and P["use_constraints"] and epoch >= 2:
+                if epoch == 2:
+                    print("Activating the constraints")
+                use_constraints = True
+
+
             batch['logits'] = model.f(batch['image'])
             batch['preds'] = torch.sigmoid(batch['logits'])
+
             if batch['preds'].dim() == 1:
                 batch['preds'] = torch.unsqueeze(batch['preds'], 0)
+            
+            if use_constraints:
+                batch['preds'] = Z['constraints'](batch['preds'], goal=None, iterative=True)
+
             batch['label_vec_est'] = model.g(batch['idx'])
             batch['preds_np'] = batch['preds'].clone().detach().cpu().numpy() # copy of preds for use in metrics
             batch = compute_batch_loss(batch, P, Z)
@@ -150,6 +176,7 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
     
     # accelerator:
     Z['device'] = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+    print('Using device: {}'.format(Z['device']))
     
     # data:
     Z['datasets'] = datasets.get_data(P)
@@ -171,6 +198,10 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
             num_workers = P['num_workers'],
             drop_last = True
         )
+
+    group, layer = init_constraints_layer("rules.txt", P['num_classes'], Z['device'])
+    Z['constraints'] = layer
+
         
     # model:
     model = models.MultilabelModel(P, feature_extractor, linear_classifier, observed_label_matrix, estimated_labels)
@@ -257,7 +288,7 @@ if __name__ == '__main__':
     P = {}
     
     # Top-level parameters:
-    P['dataset'] = 'pascal' # pascal, coco, nuswide, cub
+    P['dataset'] = 'coco' # pascal, coco, nuswide, cub
     P['loss'] = 'role' # bce, bce_ls, iun, iu, pr, an, an_ls, wan, epr, role
     P['train_mode'] = 'linear_init' # linear_fixed_features, end_to_end, linear_init
     P['val_set_variant'] = 'clean' # clean, observed
@@ -280,7 +311,7 @@ if __name__ == '__main__':
     # Additional parameters:
     P['seed'] = 1200 # overall numpy seed
     P['use_pretrained'] = True # True, False
-    P['num_workers'] = 4
+    P['num_workers'] = 1
 
     # Dataset parameters:
     P['split_seed'] = 1200 # seed for train / val splitting
@@ -288,6 +319,9 @@ if __name__ == '__main__':
     P['ss_seed'] = 999 # seed for subsampling
     P['ss_frac_train'] = 1.0 # fraction of training set to subsample
     P['ss_frac_val'] = 1.0 # fraction of val set to subsample
+
+    # Constraints Parameters:
+    P['use_constraints'] = False # whether to use constraints or not
     
     # Dependent parameters:
     if P['loss'] in ['bce', 'bce_ls']:
@@ -334,6 +368,10 @@ if __name__ == '__main__':
         os.makedirs(P['save_path'], exist_ok=False)
         P_temp = copy.deepcopy(P) # re-set hyperparameter dict
         (feature_extractor_init, linear_classifier_init, estimated_labels_init, logs) = execute_training_run(P_temp, feature_extractor=None, linear_classifier=None)
+        print('saving objects')
+        save_obj = (feature_extractor_init, linear_classifier_init, estimated_labels_init, logs)
+        with open("linear_init_coco/linear_init.pkl", 'wb') as f:
+            pickle.dump(save_obj, f)
         print('fine-tuning from trained linear classifier')
     for bsize in [16]:
         for lr in [1e-4]:

@@ -16,7 +16,7 @@ def get_metadata(dataset_name):
         }
     elif dataset_name == 'coco':
         meta = {
-            'num_classes': 80,
+            'num_classes': 91,
             'path_to_dataset': 'data/coco',
             'path_to_images': 'data/coco'
         }
@@ -136,9 +136,9 @@ def load_data(base_path, P):
     data = {}
     for phase in ['train', 'val']:
         data[phase] = {}
-        data[phase]['labels'] = np.load(os.path.join(base_path, 'formatted_{}_labels.npy'.format(phase)))
-        data[phase]['labels_obs'] = np.load(os.path.join(base_path, 'formatted_{}_labels_obs.npy'.format(phase)))
-        data[phase]['images'] = np.load(os.path.join(base_path, 'formatted_{}_images.npy'.format(phase)))
+        data[phase]['labels'] = np.load(os.path.join(base_path, 'formatted_{}_labels.npy'.format(phase)), allow_pickle=True)
+        data[phase]['labels_obs'] = np.load(os.path.join(base_path, 'formatted_{}_labels_obs.npy'.format(phase)), allow_pickle=True)
+        data[phase]['images'] = np.load(os.path.join(base_path, 'formatted_{}_images.npy'.format(phase)), allow_pickle=True)
         data[phase]['feats'] = np.load(P['{}_feats_file'.format(phase)]) if P['use_feats'] else []
     return data
 
@@ -167,8 +167,11 @@ class multilabel:
         for phase in ['train', 'val']:
             num_initial = len(split_idx[phase])
             num_final = int(np.round(P['ss_frac_{}'.format(phase)] * num_initial))
+            print('subsampling {} set from {} to {}'.format(phase, num_initial, num_final))
             split_idx[phase] = split_idx[phase][np.sort(ss_rng.permutation(num_initial)[:num_final])]
+            print('final {} set size: {}'.format(phase, len(split_idx[phase])))
         
+        print(f"len of source_data['train']['feats']: {len(source_data['train']['feats'])} , {split_idx['train']}")
         # define train set:
         self.train = ds_multilabel(
             P['dataset'],
