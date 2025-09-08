@@ -7,3 +7,5 @@ LICENSE
 *.pyd
 *.db
 README_LOGICAL_CONSTRAINTS.md
+
+*.pkl
