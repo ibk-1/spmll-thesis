@@ -155,7 +155,7 @@ def loss_epr(batch, P, Z):
     reg_loss = expected_positive_regularizer(preds, P['expected_num_pos'], norm='2') / (P['num_classes'] ** 2)
     return loss_mtx, reg_loss
 
-def loss_role(batch, P, Z):
+def loss_role_old(batch, P, Z):
     # unpack:
     preds = batch['preds']
     observed_labels = batch['label_vec_obs']
@@ -184,6 +184,84 @@ def loss_role(batch, P, Z):
     loss_mtx += 0.5 * (loss_mtx_cross_1 + loss_mtx_cross_2)
     
     return loss_mtx, reg_loss
+
+
+def loss_role(batch, P, Z):
+    """
+    ROLE with coherent peer targets via your ConstraintsLayer.
+
+    Expects in `batch`:
+      - 'preds'            : f's probs in [0,1], shape [B,C]
+      - 'label_vec_obs'    : observed labels in {0,1}, shape [B,C]  (no -1 here, same as your ROLE)
+      - 'label_vec_est'    : g's probs in [0,1], shape [B,C]
+
+    Expects in `Z`:
+      - 'constraints_layer'   : initialized ConstraintsLayer (nn.Module)
+      - optional 'constraints_slicer' : constraints_layer.slicer(ratio) or None
+      - optional 'use_goal'   : bool; if True, pass observed labels as goal to the layer
+    """
+    # unpack:
+    preds = batch['preds']                 # f (image classifier) probs
+    observed_labels = batch['label_vec_obs']
+    estimated_labels = batch['label_vec_est']  # g (label estimator) probs
+
+    # input validation (same as your ROLE):
+    assert torch.min(observed_labels) >= 0
+
+    # --- coherent targets via your ConstraintsLayer ---
+    assert 'constraints_layer' in Z, "Provide Z['constraints_layer'] (your ConstraintsLayer)."
+    layer = Z['constraints_layer']
+    slicer = Z.get('constraints_slicer', None)
+
+    goal = None
+    if Z.get('use_goal', False):
+        # pass observed labels as goal (unknowns don't exist here; {0,1} only)
+        goal = observed_labels.float()
+
+    # project both f and g through the constraint layer to get coherent views
+    preds_hat = layer(preds, goal=goal, iterative=True, slicer=slicer)                 # ReqL(f)
+    est_hat   = layer(estimated_labels, goal=goal, iterative=True, slicer=slicer)      # ReqL(g)
+
+    # ------------------------------
+    # (image classifier) loss terms:
+    # ------------------------------
+
+    # w.r.t. observed positives (same as your code)
+    loss_mtx_pos_1 = torch.zeros_like(observed_labels)
+    loss_mtx_pos_1[observed_labels == 1] = neg_log(preds[observed_labels == 1])
+
+    # w.r.t. label estimator outputs (BUT use coherent targets est_hat, stopgrad)
+    est_hat_detached = est_hat.detach()
+    loss_mtx_cross_1 = est_hat_detached * neg_log(preds) + (1.0 - est_hat_detached) * neg_log(1.0 - preds)
+
+    # regularizer (same as your code)
+    reg_1 = expected_positive_regularizer(preds, P['expected_num_pos'], norm='2') / (P['num_classes'] ** 2)
+
+    # ------------------------------
+    # (label estimator) loss terms:
+    # ------------------------------
+
+    # w.r.t. observed positives (same as your code)
+    loss_mtx_pos_2 = torch.zeros_like(observed_labels)
+    loss_mtx_pos_2[observed_labels == 1] = neg_log(estimated_labels[observed_labels == 1])
+
+    # w.r.t. image classifier outputs (use coherent targets preds_hat, stopgrad)
+    preds_hat_detached = preds_hat.detach()
+    loss_mtx_cross_2 = preds_hat_detached * neg_log(estimated_labels) + (1.0 - preds_hat_detached) * neg_log(1.0 - estimated_labels)
+
+    # regularizer (same as your code)
+    reg_2 = expected_positive_regularizer(estimated_labels, P['expected_num_pos'], norm='2') / (P['num_classes'] ** 2)
+
+    # ------------------------------
+    # combine exactly like your ROLE
+    # ------------------------------
+    reg_loss = 0.5 * (reg_1 + reg_2)
+
+    loss_mtx = 0.5 * (loss_mtx_pos_1 + loss_mtx_pos_2)
+    loss_mtx += 0.5 * (loss_mtx_cross_1 + loss_mtx_cross_2)
+
+    return loss_mtx, reg_loss
+
 
 loss_functions = {
     'bce': loss_bce,

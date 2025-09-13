@@ -1,62 +1,103 @@
 import numpy as np
 import copy
 import metrics
+import sys, os
+from typing import List, IO, Optional
 
 class train_logger:
-    
     '''
-    An instance of this class keeps track of various metrics throughout
-    the training process.
+    Tracks metrics during training and mirrors all reports to console AND a log file.
+    Log file path: <params["save_path"]>/output.log (auto-created).
     '''
-    
-    def __init__(self, params):
-        
+
+    def __init__(self, params, streams: Optional[List[IO]] = None):
         self.params = params
-        
+
+        # --- multi-stream setup (console + file) ---
+        self._streams: List[IO] = [sys.stdout] if streams is None else list(streams)
+        self._owned_files: List[IO] = []
+        try:
+            save_path = params.get("save_path", None)
+            if save_path is not None:
+                os.makedirs(save_path, exist_ok=True)
+                log_path = os.path.join(save_path, "output.log")
+                fh = open(log_path, "a", buffering=1, encoding="utf-8")  # line-buffered
+                self._streams.append(fh)
+                self._owned_files.append(fh)
+                # small header once per run
+                self._writeln("=" * 80)
+                self._writeln("Logging to: {}".format(log_path))
+                self._writeln("=" * 80)
+        except Exception as e:
+            # Fall back silently if file creation fails
+            self._writeln(f"[train_logger] WARNING: could not open log file: {e}")
+
         # epoch-level objects:
         self.best_stop_metric = -np.inf
         self.best_epoch = -1
         self.running_loss = 0.0
         self.num_examples = 0
-        
+
         # batch-level objects:
         self.temp_preds = []
         self.temp_true = [] # true labels
-        self.temp_obs = [] # observed labels
+        self.temp_obs = []  # observed labels
         self.temp_indices = [] # indices for each example
         self.temp_batch_loss = []
         self.temp_batch_reg = []
-        
-        # output objects: 
+
+        # output objects:
         self.logs = {}
         self.logs['metrics'] = {}
         self.logs['best_preds'] = {}
-        self.logs['gt'] ={}
+        self.logs['gt'] = {}
         self.logs['obs'] = {}
         self.logs['targ'] = {}
         self.logs['idx'] = {}
         for field in self.logs:
             for phase in ['train', 'val', 'test']:
                 self.logs[field][phase] = {}
-    
+
+    # ---------- streaming helpers ----------
+    def add_stream(self, stream: IO):
+        self._streams.append(stream)
+
+    def _write(self, msg: str = ""):
+        for s in self._streams:
+            try:
+                s.write(msg)
+                s.flush()
+            except Exception:
+                pass
+
+    def _writeln(self, msg: str = ""):
+        self._write(msg + ("\n" if not msg.endswith("\n") else ""))
+
+    def close(self):
+        for fh in self._owned_files:
+            try:
+                fh.close()
+            except Exception:
+                pass
+        self._owned_files.clear()
+
+    # ---------- original API below (unchanged semantics) ----------
     def compute_phase_metrics(self, phase, epoch, labels_est):
-        
         '''
-        Compute and store end-of-phase metrics. 
+        Compute and store end-of-phase metrics.
         '''
-        
-        self.logs['metrics'][phase][epoch] = {} 
-        
+        self.logs['metrics'][phase][epoch] = {}
+
         # compute metrics w.r.t. clean ground truth labels:
         metrics_clean = compute_metrics(self.temp_preds, self.temp_true)
         for k in metrics_clean:
             self.logs['metrics'][phase][epoch][k + '_clean'] = metrics_clean[k]
-        
+
         # compute metrics w.r.t. observed labels:
         metrics_observed = compute_metrics(self.temp_preds, self.temp_obs)
         for k in metrics_observed:
             self.logs['metrics'][phase][epoch][k + '_observed'] = metrics_observed[k]
-        
+
         if phase == 'train':
             self.logs['metrics'][phase][epoch]['loss'] = self.running_loss / self.num_examples
             self.logs['metrics'][phase][epoch]['est_labels_k_hat'] = float(np.mean(np.sum(labels_est, axis=1)))
@@ -66,22 +107,18 @@ class train_logger:
             self.logs['metrics'][phase][epoch]['est_labels_k_hat'] = -999
             self.logs['metrics'][phase][epoch]['avg_batch_reg'] = -999
         self.logs['metrics'][phase][epoch]['preds_k_hat'] = np.mean(np.sum(self.temp_preds, axis=1))
-   
+
     def get_stop_metric(self, phase, epoch, variant):
-        
         '''
         Query the stop metric.
         '''
-        
         assert variant in ['clean', 'observed']
         return self.logs['metrics'][phase][epoch][self.params['stop_metric'] + '_' + variant]
 
     def update_phase_data(self, batch):
-        
         '''
-        Store data from a batch for later use in computing metrics. 
+        Store data from a batch for later use in computing metrics.
         '''
-        
         for i in range(len(batch['idx'])):
             self.temp_preds.append(batch['preds_np'][i, :].tolist())
             self.temp_true.append(batch['label_vec_true'][i, :].tolist())
@@ -91,13 +128,11 @@ class train_logger:
         self.temp_batch_loss.append(float(batch['loss_np']))
         self.temp_batch_reg.append(float(batch['reg_loss_np']))
         self.running_loss += float(batch['loss_np'] * batch['image'].size(0))
-        
+
     def reset_phase_data(self):
-        
         '''
-        Reset for a new phase. 
+        Reset for a new phase.
         '''
-        
         self.temp_preds = []
         self.temp_true = []
         self.temp_obs = []
@@ -105,13 +140,11 @@ class train_logger:
         self.temp_batch_reg = []
         self.running_loss = 0.0
         self.num_examples = 0.0
-        
+
     def update_best_results(self, phase, epoch, variant):
-        
         '''
         Update the current best epoch info if applicable.
         '''
-        
         if phase == 'train':
             return False
         elif phase == 'val':
@@ -124,9 +157,9 @@ class train_logger:
                 self.logs['gt'][phase] = self.temp_true
                 self.logs['obs'][phase] = self.temp_obs
                 self.logs['idx'][phase] = self.temp_indices
-                return True # new best found
+                return True  # new best found
             else:
-                return False # new best not found
+                return False  # new best not found
         elif phase == 'test':
             if epoch == self.best_epoch:
                 self.logs['best_preds'][phase] = self.temp_preds
@@ -134,15 +167,13 @@ class train_logger:
                 self.logs['obs'][phase] = self.temp_obs
                 self.logs['idx'][phase] = self.temp_indices
             return False
-        
+
     def get_logs(self):
-        
         '''
         Return a copy of all log data.
         '''
-        
         return copy.deepcopy(self.logs)
-    
+
     def report(self, t_i, t_f, phase, epoch):
         report = '[{}] time: {:.2f} min, loss: {:.3f}, {}: {:.2f}, {}: {:.2f}'.format(
             phase,
@@ -152,18 +183,16 @@ class train_logger:
             self.get_stop_metric(phase, epoch, 'clean'),
             self.params['stop_metric'] + '_observed',
             self.get_stop_metric(phase, epoch, 'observed'),
-            )
-        print(report)
-        
+        )
+        self._writeln(report)
+
 
 def compute_metrics(y_pred, y_true):
-    
     '''
     Given predictions and labels, compute a few metrics.
     '''
-    
     num_examples, num_classes = np.shape(y_true)
-    
+
     results = {}
     average_precision_list = []
     y_pred = np.array(y_pred)
@@ -171,14 +200,14 @@ def compute_metrics(y_pred, y_true):
     y_true = np.array(y_true == 1, dtype=np.float32) # convert from -1 / 1 format to 0 / 1 format
     for j in range(num_classes):
         average_precision_list.append(metrics.compute_avg_precision(y_true[:, j], y_pred[:, j]))
-        
+
     results['map'] = 100.0 * float(np.mean(average_precision_list))
-    
+
     for k in [1, 3, 5]:
         rec_at_k = np.array([metrics.compute_recall_at_k(y_true[i, :], y_pred[i, :], k) for i in range(num_examples)])
         prec_at_k = np.array([metrics.compute_precision_at_k(y_true[i, :], y_pred[i, :], k) for i in range(num_examples)])
         results['rec_at_{}'.format(k)] = np.mean(rec_at_k)
         results['prec_at_{}'.format(k)] = np.mean(prec_at_k)
         results['top_{}'.format(k)] = np.mean(prec_at_k > 0)
-    
+
     return results
