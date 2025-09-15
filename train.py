@@ -55,23 +55,10 @@ def run_train_phase(model, P, Z, logger, epoch, phase):
         with torch.set_grad_enabled(True):
             # batch['logits'], batch['label_vec_est'] = model(batch)
             # inside run_train_phase
-            use_constraints = False
-            if P["train_mode"] == "end_to_end" and P["use_constraints"] and epoch >= 2:
-                if epoch == 2:
-                    print("Activating the constraints")
-                use_constraints = True
-
             batch["logits"] = model.f(batch["image"])
             batch["preds"] = torch.sigmoid(batch["logits"])
-
             if batch["preds"].dim() == 1:
                 batch["preds"] = torch.unsqueeze(batch["preds"], 0)
-
-            if use_constraints:
-                batch["preds"] = Z["constraints"](
-                    batch["preds"], goal=None, iterative=True
-                )
-
             batch["label_vec_est"] = model.g(batch["idx"])
             batch["preds_np"] = (
                 batch["preds"].clone().detach().cpu().numpy()
@@ -315,7 +302,7 @@ if __name__ == "__main__":
     P = {}
 
     # Top-level parameters:
-    P["dataset"] = "coco"  # pascal, coco, nuswide, cub
+    P["dataset"] = "pascal"  # pascal, coco, nuswide, cub
     P["loss"] = "role"  # bce, bce_ls, iun, iu, pr, an, an_ls, wan, epr, role
     P["train_mode"] = "linear_init"  # linear_fixed_features, end_to_end, linear_init
     P["val_set_variant"] = "clean"  # clean, observed
@@ -433,11 +420,84 @@ if __name__ == "__main__":
             )
 
         print("fine-tuning from trained linear classifier")
+        print("starting with constraints")
     for bsize in [16]:
         for lr in [1e-4]:
             now_str = datetime.datetime.now().strftime("%Y_%m_%d_%X").replace(":", "-")
             # Constraints Parameters:
-            P["use_constraints"] = False  # whether to use constraints or not
+            P["loss"] = "role_logics"  # switch to ROLE with constraints
+            print("training with constraints")
+            print("loss: {}".format(P["loss"]))
+            P["bsize"] = bsize
+            P["lr"] = lr
+            P["save_path"] = (
+                "./results/"
+                + P["experiment_name"]
+                + "_"
+                + now_str
+                + "_"
+                + P["dataset"]
+                + "_with_constraints"
+            )
+            P_temp = copy.deepcopy(P)  # re-set hyperparameter dict
+            if P["train_mode"] == "linear_init":
+                P_temp["save_path"] = P["save_path"] + "_fine_tuned_from_linear"
+                os.makedirs(P_temp["save_path"], exist_ok=False)
+                P_temp["train_mode"] = "end_to_end"
+                P_temp["num_epochs"] = 10
+                P_temp["freeze_feature_extractor"] = False
+                P_temp["use_feats"] = False
+                P_temp["arch"] = "resnet50"
+                feat_ex, lin_cls, est_lab = make_fresh_from_templates()
+
+                (feature_extractor, linear_classifier, estimated_labels, logs) = (
+                    execute_training_run(
+                        P_temp,
+                        feature_extractor=feat_ex,
+                        linear_classifier=lin_cls,
+                        estimated_labels=est_lab,
+                    )
+                )
+            else:
+                os.makedirs(P["save_path"], exist_ok=False)
+                (feature_extractor, linear_classifier, estimated_labels, logs) = (
+                    execute_training_run(
+                        P_temp, feature_extractor=None, linear_classifier=None
+                    )
+                )
+            # keep track of the best run:
+            best_epoch = np.argmax(
+                [
+                    logs["metrics"]["val"][epoch][
+                        P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
+                    ]
+                    for epoch in range(P_temp["num_epochs"])
+                ]
+            )
+            val_score = logs["metrics"]["val"][best_epoch][
+                P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
+            ]
+            test_score = logs["metrics"]["test"][best_epoch][
+                P_temp["stop_metric"] + "_clean"
+            ]
+            if val_score > best_val_score:
+                best_val_score = val_score
+                best_test_score = test_score
+                best_params = copy.deepcopy(P_temp)
+    # report the best run:
+    print("best run: {}".format(best_params["save_path"]))
+    print("- learning rate: {}".format(best_params["lr"]))
+    print("- batch size:    {}".format(best_params["bsize"]))
+    print("- val score:     {}".format(best_val_score))
+    print("- test score:    {}".format(best_test_score))
+
+    for bsize in [16]:
+        for lr in [1e-4]:
+            now_str = datetime.datetime.now().strftime("%Y_%m_%d_%X").replace(":", "-")
+            # Constraints Parameters:
+            print("training without constraints")
+            P["loss"] = "role"  # switch back to ROLE without constraints
+            print("loss: {}".format(P["loss"]))
             P["bsize"] = bsize
             P["lr"] = lr
             P["save_path"] = (
@@ -496,68 +556,6 @@ if __name__ == "__main__":
                 best_params = copy.deepcopy(P_temp)
     # report the best run:
     print("Results without constraints:")
-    print("best run: {}".format(best_params["save_path"]))
-    print("- learning rate: {}".format(best_params["lr"]))
-    print("- batch size:    {}".format(best_params["bsize"]))
-    print("- val score:     {}".format(best_val_score))
-    print("- test score:    {}".format(best_test_score))
-
-    print("starting with constraints")
-    for bsize in [16]:
-        for lr in [1e-4]:
-            now_str = datetime.datetime.now().strftime("%Y_%m_%d_%X").replace(":", "-")
-            # Constraints Parameters:
-            P["use_constraints"] = True  # whether to use constraints or not
-            P["bsize"] = bsize
-            P["lr"] = lr
-            P["save_path"] = (
-                "./results/"
-                + P["experiment_name"]
-                + "_"
-                + now_str
-                + "_"
-                + P["dataset"]
-                + "_with_constraints"
-            )
-            P_temp = copy.deepcopy(P)  # re-set hyperparameter dict
-            if P["train_mode"] == "linear_init":
-                P_temp["save_path"] = P["save_path"] + "_fine_tuned_from_linear"
-                os.makedirs(P_temp["save_path"], exist_ok=False)
-                P_temp["train_mode"] = "end_to_end"
-                P_temp["num_epochs"] = 10
-                P_temp["freeze_feature_extractor"] = False
-                P_temp["use_feats"] = False
-                P_temp["arch"] = "resnet50"
-                feat_ex, lin_cls, est_lab = make_fresh_from_templates()
-
-                (feature_extractor, linear_classifier, estimated_labels, logs) = execute_training_run(
-                    P_temp, feature_extractor=feat_ex, linear_classifier=lin_cls, estimated_labels=est_lab
-                )
-            else:
-                os.makedirs(P['save_path'], exist_ok=False)
-                (feature_extractor, linear_classifier, estimated_labels, logs) = execute_training_run(
-                    P_temp, feature_extractor=None, linear_classifier=None
-                )
-            # keep track of the best run:
-            best_epoch = np.argmax(
-                [
-                    logs["metrics"]["val"][epoch][
-                        P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
-                    ]
-                    for epoch in range(P_temp["num_epochs"])
-                ]
-            )
-            val_score = logs["metrics"]["val"][best_epoch][
-                P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
-            ]
-            test_score = logs["metrics"]["test"][best_epoch][
-                P_temp["stop_metric"] + "_clean"
-            ]
-            if val_score > best_val_score:
-                best_val_score = val_score
-                best_test_score = test_score
-                best_params = copy.deepcopy(P_temp)
-    # report the best run:
     print("best run: {}".format(best_params["save_path"]))
     print("- learning rate: {}".format(best_params["lr"]))
     print("- batch size:    {}".format(best_params["bsize"]))

@@ -155,7 +155,7 @@ def loss_epr(batch, P, Z):
     reg_loss = expected_positive_regularizer(preds, P['expected_num_pos'], norm='2') / (P['num_classes'] ** 2)
     return loss_mtx, reg_loss
 
-def loss_role_old(batch, P, Z):
+def loss_role(batch, P, Z):
     # unpack:
     preds = batch['preds']
     observed_labels = batch['label_vec_obs']
@@ -186,7 +186,7 @@ def loss_role_old(batch, P, Z):
     return loss_mtx, reg_loss
 
 
-def loss_role(batch, P, Z):
+def loss_role_logics(batch, P, Z):
     """
     ROLE with coherent peer targets via your ConstraintsLayer.
 
@@ -209,8 +209,7 @@ def loss_role(batch, P, Z):
     assert torch.min(observed_labels) >= 0
 
     # --- coherent targets via your ConstraintsLayer ---
-    assert 'constraints_layer' in Z, "Provide Z['constraints_layer'] (your ConstraintsLayer)."
-    layer = Z['constraints_layer']
+    layer = Z['constraints']
     slicer = Z.get('constraints_slicer', None)
 
     goal = None
@@ -274,6 +273,7 @@ loss_functions = {
     'wan': loss_wan,
     'epr': loss_epr,
     'role': loss_role,
+    'role_logics': loss_role_logics
 }
 
 '''
