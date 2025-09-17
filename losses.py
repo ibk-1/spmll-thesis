@@ -22,6 +22,18 @@ def expected_positive_regularizer(preds, expected_num_pos, norm='2'):
         raise NotImplementedError
     return reg
     
+    
+# Instead of: F.mse_loss(preds, preds_hat.detach())
+
+def safe_consistency_loss(preds_raw, preds_constrained, threshold=0.05):
+    # Only learn from significant constraint corrections
+    mask = (torch.abs(preds_raw - preds_constrained) > threshold).float()
+    kl_loss = preds_constrained * torch.log(preds_constrained / (preds_raw + LOG_EPSILON) + LOG_EPSILON)
+    return (kl_loss * mask).sum() / mask.sum().clamp(min=1.0)
+
+# # In your loss function:
+# consistency_loss = safe_consistency_loss(preds, preds_hat.detach()) + \
+#                   safe_consistency_loss(estimated_labels, est_hat.detach())
 
 '''
 loss functions
@@ -210,16 +222,10 @@ def loss_role_logics(batch, P, Z):
 
     # --- coherent targets via your ConstraintsLayer ---
     layer = Z['constraints']
-    slicer = Z.get('constraints_slicer', None)
-
-    goal = None
-    if Z.get('use_goal', False):
-        # pass observed labels as goal (unknowns don't exist here; {0,1} only)
-        goal = observed_labels.float()
 
     # project both f and g through the constraint layer to get coherent views
-    preds_hat = layer(preds, goal=goal, iterative=True, slicer=slicer)                 # ReqL(f)
-    est_hat   = layer(estimated_labels, goal=goal, iterative=True, slicer=slicer)      # ReqL(g)
+    preds_hat = layer(preds, iterative=True)                 # ReqL(f)
+    est_hat   = layer(estimated_labels, iterative=True)      # ReqL(g)
 
     # ------------------------------
     # (image classifier) loss terms:
@@ -230,9 +236,8 @@ def loss_role_logics(batch, P, Z):
     loss_mtx_pos_1[observed_labels == 1] = neg_log(preds[observed_labels == 1])
 
     # w.r.t. label estimator outputs (BUT use coherent targets est_hat, stopgrad)
-    est_hat_detached = est_hat.detach()
-    loss_mtx_cross_1 = est_hat_detached * neg_log(preds) + (1.0 - est_hat_detached) * neg_log(1.0 - preds)
-
+    estimated_labels_detached = estimated_labels.detach()
+    loss_mtx_cross_1 = estimated_labels_detached * neg_log(preds) + (1.0 - estimated_labels_detached) * neg_log(1.0 - preds)
     # regularizer (same as your code)
     reg_1 = expected_positive_regularizer(preds, P['expected_num_pos'], norm='2') / (P['num_classes'] ** 2)
 
@@ -244,10 +249,10 @@ def loss_role_logics(batch, P, Z):
     loss_mtx_pos_2 = torch.zeros_like(observed_labels)
     loss_mtx_pos_2[observed_labels == 1] = neg_log(estimated_labels[observed_labels == 1])
 
-    # w.r.t. image classifier outputs (use coherent targets preds_hat, stopgrad)
-    preds_hat_detached = preds_hat.detach()
-    loss_mtx_cross_2 = preds_hat_detached * neg_log(estimated_labels) + (1.0 - preds_hat_detached) * neg_log(1.0 - estimated_labels)
-
+     # (label estimator) compute loss w.r.t. image classifier outputs:
+    preds_detached = preds.detach()
+    loss_mtx_cross_2 = preds_detached * neg_log(estimated_labels) + (1.0 - preds_detached) * neg_log(1.0 - estimated_labels)
+    
     # regularizer (same as your code)
     reg_2 = expected_positive_regularizer(estimated_labels, P['expected_num_pos'], norm='2') / (P['num_classes'] ** 2)
 
@@ -255,6 +260,10 @@ def loss_role_logics(batch, P, Z):
     # combine exactly like your ROLE
     # ------------------------------
     reg_loss = 0.5 * (reg_1 + reg_2)
+    
+    consistency_loss = safe_consistency_loss(preds, preds_hat.detach()) + \
+                      safe_consistency_loss(estimated_labels, est_hat.detach())
+    reg_loss += P.get('consistency_coef', 1.0) * consistency_loss
 
     loss_mtx = 0.5 * (loss_mtx_pos_1 + loss_mtx_pos_2)
     loss_mtx += 0.5 * (loss_mtx_cross_1 + loss_mtx_cross_2)
