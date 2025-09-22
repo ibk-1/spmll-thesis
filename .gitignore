@@ -10,3 +10,4 @@ README_LOGICAL_CONSTRAINTS.md
 
 *.pkl
 venv
+venv_*/

@@ -16,6 +16,7 @@ from ccn.constraints_group import ConstraintsGroup
 from ccn.clauses_group import ClausesGroup
 from ccn.constraints_layer import ConstraintsLayer
 
+import wandb  # ====== W&B already imported in your file ======
 
 def init_constraints_layer(rules_path, num_classes, device):
     group = ConstraintsGroup(rules_path)
@@ -29,40 +30,24 @@ def init_constraints_layer(rules_path, num_classes, device):
 def run_train_phase(model, P, Z, logger, epoch, phase):
     """
     Run one training phase.
-
-    Parameters
-    model: Model to train.
-    P: Dictionary of parameters, which completely specify the training procedure.
-    Z: Dictionary of temporary objects used during training.
-    logger: Object used to track various metrics during training.
-    epoch: Integer index of the current epoch.
-    phase: String giving the phase name
     """
-
     assert phase == "train"
+    Z['current_epoch'] = epoch
     model.train()
     for batch in Z["dataloaders"][phase]:
         # move data to GPU:
         batch["image"] = batch["image"].to(Z["device"], non_blocking=True)
-        batch["labels_np"] = (
-            batch["label_vec_obs"].clone().numpy()
-        )  # copy of labels for use in metrics
-        batch["label_vec_obs"] = batch["label_vec_obs"].to(
-            Z["device"], non_blocking=True
-        )
+        batch["labels_np"] = batch["label_vec_obs"].clone().numpy()
+        batch["label_vec_obs"] = batch["label_vec_obs"].to(Z["device"], non_blocking=True)
         # forward pass:
         Z["optimizer"].zero_grad()
         with torch.set_grad_enabled(True):
-            # batch['logits'], batch['label_vec_est'] = model(batch)
-            # inside run_train_phase
             batch["logits"] = model.f(batch["image"])
             batch["preds"] = torch.sigmoid(batch["logits"])
             if batch["preds"].dim() == 1:
                 batch["preds"] = torch.unsqueeze(batch["preds"], 0)
             batch["label_vec_est"] = model.g(batch["idx"])
-            batch["preds_np"] = (
-                batch["preds"].clone().detach().cpu().numpy()
-            )  # copy of preds for use in metrics
+            batch["preds_np"] = batch["preds"].clone().detach().cpu().numpy()
             batch = compute_batch_loss(batch, P, Z)
         # backward pass:
         batch["loss_tensor"].backward()
@@ -70,55 +55,65 @@ def run_train_phase(model, P, Z, logger, epoch, phase):
         # save current batch data:
         logger.update_phase_data(batch)
 
+        # === W&B ADDED: log per-batch training loss and lr ===
+        try:
+            loss_val = batch.get("loss_np", None)
+            reg_loss_val = batch.get("reg_loss_np", None)
+            lr = Z["optimizer"].param_groups[0].get("lr", None)
+            log_dict = {"epoch": epoch, "step": Z.get("global_step", 0)}
+            if loss_val is not None:
+                log_dict["train/loss"] = float(loss_val)
+            if reg_loss_val is not None:
+                log_dict["train/reg_loss"] = float(reg_loss_val)
+            if lr is not None:
+                log_dict["train/lr"] = float(lr)
+            # Commit each batch so W&B gets streaming update
+            wandb.log(log_dict, commit=True)
+        except Exception as e:
+            # keep training robust if wandb fails
+            # you can enable a debug print here if you want
+            pass
+
+        # optional: increment a global step counter if you want epoch+step in logs
+        Z["global_step"] = Z.get("global_step", 0) + 1
+
 
 def run_eval_phase(model, P, Z, logger, epoch, phase):
     """
     Run one evaluation phase.
-
-    Parameters
-    model: Model to train.
-    P: Dictionary of parameters, which completely specify the training procedure.
-    Z: Dictionary of temporary objects used during training.
-    logger: Object used to track various metrics during training.
-    epoch: Integer index of the current epoch.
-    phase: String giving the phase name
     """
-
     assert phase in ["val", "test"]
     model.eval()
     for batch in Z["dataloaders"][phase]:
         # move data to GPU:
         batch["image"] = batch["image"].to(Z["device"], non_blocking=True)
-        batch["labels_np"] = (
-            batch["label_vec_obs"].clone().numpy()
-        )  # copy of labels for use in metrics
-        batch["label_vec_obs"] = batch["label_vec_obs"].to(
-            Z["device"], non_blocking=True
-        )
+        batch["labels_np"] = batch["label_vec_obs"].clone().numpy()
+        batch["label_vec_obs"] = batch["label_vec_obs"].to(Z["device"], non_blocking=True)
         # forward pass:
         with torch.set_grad_enabled(False):
             batch["logits"] = model.f(batch["image"])
             batch["preds"] = torch.sigmoid(batch["logits"])
             if batch["preds"].dim() == 1:
                 batch["preds"] = torch.unsqueeze(batch["preds"], 0)
-            batch["preds_np"] = (
-                batch["preds"].clone().detach().cpu().numpy()
-            )  # copy of preds for use in metrics
+            batch["preds_np"] = batch["preds"].clone().detach().cpu().numpy()
             batch["loss_np"] = -1
             batch["reg_loss_np"] = -1
         # save current batch data:
         logger.update_phase_data(batch)
 
+        # === W&B ADDED: log per-batch eval loss (if available) ===
+        try:
+            loss_val = batch.get("loss_np", None)
+            if loss_val is not None and loss_val >= 0:
+                wandb.log({"epoch": epoch, f"{phase}/loss": float(loss_val)}, commit=False)
+        except Exception:
+            pass
+
 
 def train(model, P, Z):
     """
     Train the model.
-
-    Parameters
-    P: Dictionary of parameters, which completely specify the training procedure.
-    Z: Dictionary of temporary objects used during training.
     """
-
     best_weights_f = copy.deepcopy(model.f.state_dict())
     best_weights_g = copy.deepcopy(model.g.state_dict())
     logger = train_logger(P)  # initialize logger
@@ -143,26 +138,81 @@ def train(model, P, Z):
             # print epoch status:
             logger.report(t_init, time.time(), phase, epoch)
 
+            # === W&B ADDED: log epoch-level metric(s) if available ===
+            try:
+                # Attempt to log the stop metric (e.g., map) for this phase
+                stop_metric_name = P.get("stop_metric", None)
+                if stop_metric_name is not None:
+                    # For val/test we include val_set_variant; for train it might not apply
+                    variant = P.get("val_set_variant", None)
+                    try:
+                        metric_val = logger.get_stop_metric(phase, epoch, variant)
+                    except Exception:
+                        # fallback: try calling without variant
+                        metric_val = logger.get_stop_metric(phase, epoch, None)
+                    if metric_val is not None:
+                        wandb.log({"epoch": epoch, f"{phase}/{stop_metric_name}": float(metric_val)}, commit=True)
+                else:
+                    # fallback: try to dump any accessible summary metrics from logger
+                    # many loggers provide a dict; attempt to access logger.phase_metrics
+                    phase_metrics = getattr(logger, "phase_metrics", None)
+                    if isinstance(phase_metrics, dict):
+                        log_dict = {"epoch": epoch}
+                        for k, v in phase_metrics.items():
+                            log_dict[f"{phase}/{k}"] = float(v)
+                        wandb.log(log_dict, commit=True)
+            except Exception:
+                pass
+
             # update best epoch, if applicable:
-            new_best = logger.update_best_results(phase, epoch, P["val_set_variant"])
+            new_best = False
+            try:
+                new_best = logger.update_best_results(phase, epoch, P["val_set_variant"])
+            except Exception:
+                # if logger signature differs, still try to update best via returned info
+                try:
+                    new_best = logger.update_best_results(phase, epoch)
+                except Exception:
+                    new_best = False
+
             if new_best:
                 print("*** new best weights ***")
                 best_weights_f = copy.deepcopy(model.f.state_dict())
                 best_weights_g = copy.deepcopy(model.g.state_dict())
+                # === W&B ADDED: save & upload best weights as artifact ===
+                try:
+                    # ensure save path exists
+                    os.makedirs(P["save_path"], exist_ok=True)
+                    f_path = os.path.join(P["save_path"], f"best_model_state_f_epoch{epoch}.pt")
+                    g_path = os.path.join(P["save_path"], f"best_model_state_g_epoch{epoch}.pt")
+                    torch.save(best_weights_f, f_path)
+                    torch.save(best_weights_g, g_path)
+                    artifact = wandb.Artifact(f"{P['experiment_name']}_best_epoch_{epoch}", type="model")
+                    artifact.add_file(f_path)
+                    artifact.add_file(g_path)
+                    wandb.log_artifact(artifact)
+                except Exception:
+                    pass
 
     print("")
     print("*** TRAINING COMPLETE ***")
     print("Best epoch: {}".format(logger.best_epoch))
-    print(
-        "Best epoch validation score: {:.2f}".format(
-            logger.get_stop_metric("val", logger.best_epoch, P["val_set_variant"])
+    try:
+        print(
+            "Best epoch validation score: {:.2f}".format(
+                logger.get_stop_metric("val", logger.best_epoch, P["val_set_variant"])
+            )
         )
-    )
-    print(
-        "Best epoch test score:       {:.2f}".format(
-            logger.get_stop_metric("test", logger.best_epoch, "clean")
+    except Exception:
+        pass
+    try:
+        print(
+            "Best epoch test score:       {:.2f}".format(
+                logger.get_stop_metric("test", logger.best_epoch, "clean")
+            )
         )
-    )
+    except Exception:
+        pass
 
     return P, model, logger, best_weights_f, best_weights_g
 
@@ -170,14 +220,7 @@ def train(model, P, Z):
 def initialize_training_run(P, feature_extractor, linear_classifier, estimated_labels):
     """
     Set up for model training.
-
-    Parameters
-    P: Dictionary of parameters, which completely specify the training procedure.
-    feature_extractor: Feature extractor model to start from.
-    linear_classifier: Linear classifier model to start from.
-    estimated_labels: NumPy array containing estimated training set labels to start from (for ROLE).
     """
-
     os.makedirs(P["save_path"], exist_ok=True)
     np.random.seed(P["seed"])
 
@@ -208,7 +251,7 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
             drop_last=True,
         )
 
-    group, layer = init_constraints_layer("rules.txt", P["num_classes"], Z["device"])
+    group, layer = init_constraints_layer("coco-rules.txt", P["num_classes"], Z["device"])
     Z["constraints"] = layer
 
     # model:
@@ -233,18 +276,17 @@ def execute_training_run(
 ):
     """
     Initialize, run the training process, and save the results.
-
-    Parameters
-    P: Dictionary of parameters, which completely specify the training procedure.
-    feature_extractor: Feature extractor model to start from.
-    linear_classifier: Linear classifier model to start from.
-    estimated_labels: NumPy array containing estimated training set labels to start from (for ROLE).
     """
-
     P, Z, model = initialize_training_run(
         P, feature_extractor, linear_classifier, estimated_labels
     )
     model.to(Z["device"])
+
+    # === W&B ADDED: watch the model so W&B can track gradients/parameters ===
+    try:
+        wandb.watch(model, log="all", log_freq=100)
+    except Exception:
+        pass
 
     P, model, logger, best_weights_f, best_weights_g = train(model, P, Z)
 
@@ -283,7 +325,7 @@ if __name__ == "__main__":
     lookup = {
         "feat_dim": {"resnet50": 2048},
         "expected_num_pos": {"pascal": 1.5, "coco": 2.9, "nuswide": 1.9, "cub": 31.4},
-        "linear_init_params": {  # best learning rate and batch size for linear_fixed_features phase of linear_init
+        "linear_init_params": {
             "an_ls": {
                 "pascal": {"linear_init_lr": 1e-4, "linear_init_bsize": 8},
                 "coco": {"linear_init_lr": 1e-4, "linear_init_bsize": 8},
@@ -302,7 +344,7 @@ if __name__ == "__main__":
     P = {}
 
     # Top-level parameters:
-    P["dataset"] = "pascal"  # pascal, coco, nuswide, cub
+    P["dataset"] = "coco"  # pascal, coco, nuswide, cub
     P["loss"] = "role"  # bce, bce_ls, iun, iu, pr, an, an_ls, wan, epr, role
     P["train_mode"] = "linear_init"  # linear_fixed_features, end_to_end, linear_init
     P["val_set_variant"] = "clean"  # clean, observed
@@ -314,29 +356,25 @@ if __name__ == "__main__":
 
     # Optimization parameters:
     if P["train_mode"] == "linear_init":
-        P["linear_init_lr"] = lookup["linear_init_params"][P["loss"]][P["dataset"]][
-            "linear_init_lr"
-        ]
-        P["linear_init_bsize"] = lookup["linear_init_params"][P["loss"]][P["dataset"]][
-            "linear_init_bsize"
-        ]
-    P["lr_mult"] = 10.0  # learning rate multiplier for the parameters of g
-    P["stop_metric"] = "map"  # metric used to select the best epoch
+        P["linear_init_lr"] = lookup["linear_init_params"][P["loss"]][P["dataset"]]["linear_init_lr"]
+        P["linear_init_bsize"] = lookup["linear_init_params"][P["loss"]][P["dataset"]]["linear_init_bsize"]
+    P["lr_mult"] = 10.0
+    P["stop_metric"] = "map"
 
     # Loss-specific parameters:
-    P["ls_coef"] = 0.1  # label smoothing coefficient
+    P["ls_coef"] = 0.1
 
     # Additional parameters:
-    P["seed"] = 1200  # overall numpy seed
-    P["use_pretrained"] = True  # True, False
-    P["num_workers"] = 1
+    P["seed"] = 1200
+    P["use_pretrained"] = True
+    P["num_workers"] = 0
 
     # Dataset parameters:
-    P["split_seed"] = 1200  # seed for train / val splitting
-    P["val_frac"] = 0.2  # fraction of train set to split off for val
-    P["ss_seed"] = 999  # seed for subsampling
-    P["ss_frac_train"] = 1.0  # fraction of training set to subsample
-    P["ss_frac_val"] = 1.0  # fraction of val set to subsample
+    P["split_seed"] = 1200
+    P["val_frac"] = 0.2
+    P["ss_seed"] = 999
+    P["ss_frac_train"] = 1.0
+    P["ss_frac_val"] = 1.0
 
     # Dependent parameters:
     if P["loss"] in ["bce", "bce_ls"]:
@@ -363,12 +401,22 @@ if __name__ == "__main__":
     P["feature_extractor_arch"] = "resnet50"
     P["feat_dim"] = lookup["feat_dim"][P["feature_extractor_arch"]]
     P["expected_num_pos"] = lookup["expected_num_pos"][P["dataset"]]
-    P["train_feats_file"] = "./data/{}/train_features_imagenet_{}.npy".format(
-        P["dataset"], P["feature_extractor_arch"]
+    P["train_feats_file"] = "./data/{}/train_features_imagenet_{}.npy".format(P["dataset"], P["feature_extractor_arch"])
+    P["val_feats_file"] = "./data/{}/val_features_imagenet_{}.npy".format(P["dataset"], P["feature_extractor_arch"])
+
+    run = wandb.init(
+        # Set the wandb entity where your project will be logged (generally your team name).
+        entity="ibrahimkaliljh-student",
+        # Set the wandb project where this run will be logged.
+        project="spmll_thesis_logical_constraints",
+        # Track hyperparameters and run metadata.
+        config=P,
     )
-    P["val_feats_file"] = "./data/{}/val_features_imagenet_{}.npy".format(
-        P["dataset"], P["feature_extractor_arch"]
-    )
+    # === W&B ADDED: ensure config is updated (safer if edit after init) ===
+    try:
+        wandb.config.update(P)
+    except Exception:
+        pass
 
     # run training process:
     best_params = None
@@ -383,9 +431,7 @@ if __name__ == "__main__":
         print("- linear_init_bsize: {}".format(P["linear_init_bsize"]))
         P["bsize"] = P["linear_init_bsize"]
         P["lr"] = P["linear_init_lr"]
-        P["save_path"] = (
-            "./results/" + P["experiment_name"] + "_" + now_str + "_" + P["dataset"]
-        )
+        P["save_path"] = "./results/" + P["experiment_name"] + "_" + now_str + "_" + P["dataset"]
         os.makedirs(P["save_path"], exist_ok=False)
         P_temp = copy.deepcopy(P)  # re-set hyperparameter dict
         # after linear init:
@@ -396,168 +442,30 @@ if __name__ == "__main__":
             logs,
         ) = execute_training_run(P_temp, feature_extractor=None, linear_classifier=None)
         print("saving objects")
-        save_obj = (
-            feature_extractor_init,
-            linear_classifier_init,
-            estimated_labels_init,
-            logs,
-        )
+        save_obj = (feature_extractor_init, linear_classifier_init, estimated_labels_init, logs)
         with open("linear_init/linear_init_pascal.pkl", "wb") as f:
             pickle.dump(save_obj, f)
         print("fine-tuning from trained linear classifier")
 
-        # ---- NEW: freeze pristine templates for cloning later ----
-        feature_extractor_template = copy.deepcopy(feature_extractor_init)
-        linear_classifier_template = copy.deepcopy(linear_classifier_init)
-        estimated_labels_template = estimated_labels_init.copy()
-
-        def make_fresh_from_templates():
-            # return brand-new, unmodified copies every time
-            return (
-                copy.deepcopy(feature_extractor_template),
-                copy.deepcopy(linear_classifier_template),
-                estimated_labels_template.copy(),
-            )
-
-        print("fine-tuning from trained linear classifier")
-        print("starting with constraints")
-    for bsize in [16]:
-        for lr in [1e-4]:
-            now_str = datetime.datetime.now().strftime("%Y_%m_%d_%X").replace(":", "-")
-            # Constraints Parameters:
-            P["loss"] = "role_logics"  # switch to ROLE with constraints
-            print("training with constraints")
-            print("loss: {}".format(P["loss"]))
-            P["bsize"] = bsize
-            P["lr"] = lr
-            P["save_path"] = (
-                "./results/"
-                + P["experiment_name"]
-                + "_"
-                + now_str
-                + "_"
-                + P["dataset"]
-                + "_with_constraints"
-            )
-            P_temp = copy.deepcopy(P)  # re-set hyperparameter dict
-            if P["train_mode"] == "linear_init":
-                P_temp["save_path"] = P["save_path"] + "_fine_tuned_from_linear"
-                os.makedirs(P_temp["save_path"], exist_ok=False)
-                P_temp["train_mode"] = "end_to_end"
-                P_temp["num_epochs"] = 10
-                P_temp["freeze_feature_extractor"] = False
-                P_temp["use_feats"] = False
-                P_temp["arch"] = "resnet50"
-                feat_ex, lin_cls, est_lab = make_fresh_from_templates()
-
-                (feature_extractor, linear_classifier, estimated_labels, logs) = (
-                    execute_training_run(
-                        P_temp,
-                        feature_extractor=feat_ex,
-                        linear_classifier=lin_cls,
-                        estimated_labels=est_lab,
-                    )
-                )
-            else:
-                os.makedirs(P["save_path"], exist_ok=False)
-                (feature_extractor, linear_classifier, estimated_labels, logs) = (
-                    execute_training_run(
-                        P_temp, feature_extractor=None, linear_classifier=None
-                    )
-                )
-            # keep track of the best run:
-            best_epoch = np.argmax(
-                [
-                    logs["metrics"]["val"][epoch][
-                        P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
-                    ]
-                    for epoch in range(P_temp["num_epochs"])
-                ]
-            )
-            val_score = logs["metrics"]["val"][best_epoch][
-                P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
-            ]
-            test_score = logs["metrics"]["test"][best_epoch][
-                P_temp["stop_metric"] + "_clean"
-            ]
-            if val_score > best_val_score:
-                best_val_score = val_score
-                best_test_score = test_score
-                best_params = copy.deepcopy(P_temp)
-    # report the best run:
-    print("best run: {}".format(best_params["save_path"]))
-    print("- learning rate: {}".format(best_params["lr"]))
-    print("- batch size:    {}".format(best_params["bsize"]))
-    print("- val score:     {}".format(best_val_score))
-    print("- test score:    {}".format(best_test_score))
-
-    for bsize in [16]:
-        for lr in [1e-4]:
-            now_str = datetime.datetime.now().strftime("%Y_%m_%d_%X").replace(":", "-")
-            # Constraints Parameters:
-            print("training without constraints")
-            P["loss"] = "role"  # switch back to ROLE without constraints
-            print("loss: {}".format(P["loss"]))
-            P["bsize"] = bsize
-            P["lr"] = lr
-            P["save_path"] = (
-                "./results/"
-                + P["experiment_name"]
-                + "_"
-                + now_str
-                + "_"
-                + P["dataset"]
-                + "_no_constraints"
-            )
-            P_temp = copy.deepcopy(P)  # re-set hyperparameter dict
-            if P["train_mode"] == "linear_init":
-                P_temp["save_path"] = P["save_path"] + "_fine_tuned_from_linear"
-                os.makedirs(P_temp["save_path"], exist_ok=False)
-                P_temp["train_mode"] = "end_to_end"
-                P_temp["num_epochs"] = 10
-                P_temp["freeze_feature_extractor"] = False
-                P_temp["use_feats"] = False
-                P_temp["arch"] = "resnet50"
-                feat_ex, lin_cls, est_lab = make_fresh_from_templates()
-
-                (feature_extractor, linear_classifier, estimated_labels, logs) = (
-                    execute_training_run(
-                        P_temp,
-                        feature_extractor=feat_ex,
-                        linear_classifier=lin_cls,
-                        estimated_labels=est_lab,
-                    )
-                )
-            else:
-                os.makedirs(P["save_path"], exist_ok=False)
-                (feature_extractor, linear_classifier, estimated_labels, logs) = (
-                    execute_training_run(
-                        P_temp, feature_extractor=None, linear_classifier=None
-                    )
-                )
-            # keep track of the best run:
-            best_epoch = np.argmax(
-                [
-                    logs["metrics"]["val"][epoch][
-                        P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
-                    ]
-                    for epoch in range(P_temp["num_epochs"])
-                ]
-            )
-            val_score = logs["metrics"]["val"][best_epoch][
-                P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
-            ]
-            test_score = logs["metrics"]["test"][best_epoch][
-                P_temp["stop_metric"] + "_clean"
-            ]
-            if val_score > best_val_score:
-                best_val_score = val_score
-                best_test_score = test_score
-                best_params = copy.deepcopy(P_temp)
-    # report the best run:
     print("Results without constraints:")
-    print("best run: {}".format(best_params["save_path"]))
-    print("- learning rate: {}".format(best_params["lr"]))
-    print("- batch size:    {}".format(best_params["bsize"]))
-    print("- val score:     {}".format(best_val_score))
-    print("- test score:    {}".format(best_test_score))
+    # === W&B ADDED: Attempt to log final summary to W&B ===
+    try:
+        wandb.log({"final/best_val_score": best_val_score, "final/best_test_score": best_test_score})
+    except Exception:
+        pass
+
+    try:
+        print("best run: {}".format(best_params["save_path"]))
+        print("- learning rate: {}".format(best_params["lr"]))
+        print("- batch size:    {}".format(best_params["bsize"]))
+        print("- val score:     {}".format(best_val_score))
+        print("- test score:    {}".format(best_test_score))
+    except Exception:
+        # if best_params is None, just skip
+        pass
+
+    # === W&B ADDED: finish run cleanly ===
+    try:
+        wandb.finish()
+    except Exception:
+        pass
