@@ -9,232 +9,277 @@ import models
 from losses import compute_batch_loss
 import datetime
 from instrumentation import train_logger
-from ccn.constraints_layer import ConstraintsLayer
+import pickle
+
+import torch
 from ccn.constraints_group import ConstraintsGroup
-from ccn.constraint import Constraint
 from ccn.clauses_group import ClausesGroup
+from ccn.constraints_layer import ConstraintsLayer
+
+def _new_accum():
+    return dict(impl_pen=0.0, excl_pen=0.0, impl_viol=0.0, excl_viol=0.0, n=0)
+
+def _accum_update(acc, mean_impl, mean_excl, rate_impl, rate_excl):
+    # each arg can be tensor() or float
+    to_f = lambda x: float(x.detach().cpu().item()) if torch.is_tensor(x) else float(x)
+    acc["impl_pen"]  += to_f(mean_impl)
+    acc["excl_pen"]  += to_f(mean_excl)
+    acc["impl_viol"] += to_f(rate_impl)
+    acc["excl_viol"] += to_f(rate_excl)
+    acc["n"] += 1
+
+def _accum_finalize(acc):
+    if acc["n"] == 0:
+        return dict(mean_impl_pen=np.nan, mean_excl_pen=np.nan, viol_impl=np.nan, viol_excl=np.nan)
+    n = acc["n"]
+    return dict(
+        mean_impl_pen = acc["impl_pen"]/n,
+        mean_excl_pen = acc["excl_pen"]/n,
+        viol_impl     = acc["impl_viol"]/n,
+        viol_excl     = acc["excl_viol"]/n,
+    )
+
+
+@torch.no_grad()
+def _penalties_mean(preds, impl_pairs, excl_pairs):
+    # means of the *raw* per-pair penalties (not thresholded)
+    mean_impl = fuzzy_implication_penalty(preds, impl_pairs, reduction="mean").detach()
+    mean_excl = fuzzy_exclusion_penalty(preds, excl_pairs, reduction="mean").detach()
+    return mean_impl, mean_excl
+
+@torch.no_grad()
+def _violation_rates(preds, impl_pairs, excl_pairs, thr=0.5):
+    """
+    Counts violations on hardened preds: 
+      implication violates when pA>=thr and pB<thr
+      exclusion   violates when pC>=thr and pD>=thr
+    Returns mean rates over batch.
+    """
+    if preds.numel() == 0:
+        return preds.new_zeros(()), preds.new_zeros(())
+    B, C = preds.shape
+    hard = (preds >= thr).to(torch.float32)
+
+    viol_impl = []
+    for (a, b) in impl_pairs or []:
+        viol_impl.append((hard[:, a] > 0.5) & (hard[:, b] < 0.5))
+    viol_excl = []
+    for (c, d) in excl_pairs or []:
+        viol_excl.append((hard[:, c] > 0.5) & (hard[:, d] > 0.5))
+
+    if len(viol_impl) == 0:
+        rate_impl = preds.new_zeros(())
+    else:
+        rate_impl = torch.stack([v.float().mean() for v in viol_impl]).mean()
+
+    if len(viol_excl) == 0:
+        rate_excl = preds.new_zeros(())
+    else:
+        rate_excl = torch.stack([v.float().mean() for v in viol_excl]).mean()
+
+    return rate_impl, rate_excl
+
+
+# ===== Logic penalties (Łukasiewicz) – training only =====
 import torch.nn.functional as F
 
-# ---------- CCN helpers ----------
-def _ratio_for_modules(layer, k_modules=1):
-    for r in [i / 100 for i in range(0, 101)]:
-        _, m = layer.gradual_prefix(r)
-        if m >= k_modules:
-            return r
-    return 1.0
+def _relu(x):
+    return F.relu(x)
 
+@torch.no_grad()
+def _ensure_rule_tensors_device(rules, device):
+    if not rules:
+        return None, None
+    a = torch.tensor([i for i, _ in rules], device=device, dtype=torch.long)
+    b = torch.tensor([j for _, j in rules], device=device, dtype=torch.long)
+    return a, b
 
-def build_ccn(P, Z):
-    """Load rules and build the CCN layer; store in Z['ccn']."""
-    group = ConstraintsGroup(P["ccn_rules_path"])
+def fuzzy_implication_penalty(preds: torch.Tensor,
+                              implication_pairs,
+                              weights=None,
+                              eps: float = 1e-6,
+                              reduction: str = "mean") -> torch.Tensor:
+    """
+    Implication A -> B with Łukasiewicz fuzzy logic:
+      truth = min(1, 1 - pA + pB)  =>  penalty = ReLU(pA - pB)
+    preds: (B, C) in [0,1]
+    implication_pairs: list[(A_idx, B_idx)]
+    """
+    if not implication_pairs:
+        return preds.new_zeros(())
+    device = preds.device
+    A_idx, B_idx = _ensure_rule_tensors_device(implication_pairs, device)
+    pA = preds[:, A_idx].clamp(eps, 1 - eps)
+    pB = preds[:, B_idx].clamp(eps, 1 - eps)
+    pen = _relu(pA - pB)  # (B, R)
+    if weights is not None:
+        w = torch.as_tensor(weights, device=device, dtype=preds.dtype).view(1, -1)
+        pen = pen * w
+    if reduction == "mean":
+        return pen.mean()
+    elif reduction == "sum":
+        return pen.sum()
+    return pen
+
+def fuzzy_exclusion_penalty(preds: torch.Tensor,
+                            exclusion_pairs,
+                            weights=None,
+                            eps: float = 1e-6,
+                            reduction: str = "mean") -> torch.Tensor:
+    """
+    Mutual exclusion C ⟂ D with Łukasiewicz t-norm:
+      penalty = ReLU(pC + pD - 1)
+    preds: (B, C) in [0,1]
+    exclusion_pairs: list[(C_idx, D_idx)]
+    """
+    if not exclusion_pairs:
+        return preds.new_zeros(())
+    device = preds.device
+    C_idx, D_idx = _ensure_rule_tensors_device(exclusion_pairs, device)
+    pC = preds[:, C_idx].clamp(eps, 1 - eps)
+    pD = preds[:, D_idx].clamp(eps, 1 - eps)
+    pen = _relu(pC + pD - 1.0)  # (B, R)
+    if weights is not None:
+        w = torch.as_tensor(weights, device=device, dtype=preds.dtype).view(1, -1)
+        pen = pen * w
+    if reduction == "mean":
+        return pen.mean()
+    elif reduction == "sum":
+        return pen.sum()
+    return pen
+
+def constraints_loss(preds: torch.Tensor,
+                     implication_pairs,
+                     exclusion_pairs,
+                     lambda_impl: float = 1.0,
+                     lambda_excl: float = 1.0,
+                     impl_weights=None,
+                     excl_weights=None,
+                     reduction: str = "mean") -> torch.Tensor:
+    """
+    L_constraints = lambda_impl * L_impl + lambda_excl * L_excl
+    """
+    L_impl = fuzzy_implication_penalty(preds, implication_pairs, impl_weights, reduction=reduction)
+    L_excl = fuzzy_exclusion_penalty(preds, exclusion_pairs, excl_weights, reduction=reduction)
+    return lambda_impl * L_impl + lambda_excl * L_excl
+# ===== End of logic penalties =====
+
+import wandb  # ====== W&B already imported in your file ======
+
+def init_constraints_layer(rules_path, num_classes, device):
+    group = ConstraintsGroup(rules_path)
     clauses = ClausesGroup.from_constraints_group(group)
     layer = ConstraintsLayer.from_clauses_group(
-        clauses,
-        num_classes=P["num_classes"],
-        centrality=P.get("ccn_centrality", "katz"),
-    ).to(Z["device"])
-    Z["ccn"] = {"group": group, "layer": layer}
-    print(
-        f"CCN: loaded {len(group)} rules | strata sizes: {[len(s) for s in layer.strata]}"
-    )
-
-
-def apply_constraints_safe(
-    layer,
-    group,
-    probs,
-    epoch,
-    total_epochs,
-    start_ratio=0.30,
-    end_ratio=1.00,
-    tau=0.70,
-    delta_cap=0.15,
-    min_modules=1,
-):
-    """
-    Soft-ish enforcement:
-      - curriculum with >= min_modules
-      - goal-gating with threshold tau
-      - delta cap (but never break coherence; we cap only if safe)
-    """
-    raw_ratio = start_ratio + (end_ratio - start_ratio) * (
-        epoch / max(1, total_epochs - 1)
-    )
-    ratio = max(raw_ratio, _ratio_for_modules(layer, min_modules))
-    slicer = layer.slicer(ratio)
-
-    goal = (probs > tau).float()  # confident literals only
-    updated_full = layer(
-        probs, goal=goal, slicer=slicer, iterative=True
-    )  # coherent for active rules
-
-    soft = torch.minimum(updated_full, probs + delta_cap)  # attempt to cap upward jumps
-    need_full = soft + 1e-6 < updated_full  # if cap would break a rule, use full
-    final = torch.where(need_full, updated_full, soft)
-
-    # Optional quick monitor (comment out if too chatty)
-    # import numpy as np
-    # vb = 1.0 - float(group.coherent_with(probs.detach().cpu().numpy()).mean())
-    # va = 1.0 - float(group.coherent_with(final.detach().cpu().numpy()).mean())
-    # print(f"[epoch={epoch}] ratio={ratio:.2f}  viol_before={vb:.3f}  viol_after={va:.3f}")
-
-    return final
-
-
-# ---------- end CCN helpers ----------
+        clauses, num_classes=num_classes, centrality="katz"
+    ).to(device)
+    return group, layer
 
 
 def run_train_phase(model, P, Z, logger, epoch, phase):
     """
     Run one training phase.
-
-    Parameters
-    model: Model to train.
-    P: Dictionary of parameters, which completely specify the training procedure.
-    Z: Dictionary of temporary objects used during training.
-    logger: Object used to track various metrics during training.
-    epoch: Integer index of the current epoch.
-    phase: String giving the phase name
     """
-
     assert phase == "train"
+    Z['current_epoch'] = epoch
+    accum = _new_accum()
     model.train()
     for batch in Z["dataloaders"][phase]:
         # move data to GPU:
         batch["image"] = batch["image"].to(Z["device"], non_blocking=True)
-        batch["labels_np"] = (
-            batch["label_vec_obs"].clone().numpy()
-        )  # copy of labels for use in metrics
-        batch["label_vec_obs"] = batch["label_vec_obs"].to(
-            Z["device"], non_blocking=True
-        )
+        batch["labels_np"] = batch["label_vec_obs"].clone().numpy()
+        batch["label_vec_obs"] = batch["label_vec_obs"].to(Z["device"], non_blocking=True)
         # forward pass:
         Z["optimizer"].zero_grad()
         with torch.set_grad_enabled(True):
-            # batch['logits'], batch['label_vec_est'] = model(batch)
             batch["logits"] = model.f(batch["image"])
             batch["preds"] = torch.sigmoid(batch["logits"])
+            mean_impl, mean_excl = _penalties_mean(
+                batch["preds"], Z["implication_rules"], Z["exclusion_rules"]
+            )
+            rate_impl, rate_excl = _violation_rates(
+                batch["preds"], Z["implication_rules"], Z["exclusion_rules"], thr=0.5
+            )
+            _accum_update(accum, mean_impl, mean_excl, rate_impl, rate_excl)
+
             if batch["preds"].dim() == 1:
                 batch["preds"] = torch.unsqueeze(batch["preds"], 0)
             batch["label_vec_est"] = model.g(batch["idx"])
-
-            # ---- CCN integrate (training) ----
-            if P.get("ccn_enable", False):
-                ccn = Z["ccn"]
-                group = ccn["group"]
-                layer = ccn["layer"]
-                probs = batch["preds"]
-
-                # soft/safe constraints
-                probs_cons = apply_constraints_safe(
-                    layer,
-                    group,
-                    probs,
-                    epoch=epoch,
-                    total_epochs=P["num_epochs"],
-                    start_ratio=P.get("ccn_ratio_start", 0.30),
-                    end_ratio=P.get("ccn_ratio_end", 1.00),
-                    tau=P.get("ccn_goal_tau", 0.70),
-                    delta_cap=P.get("ccn_delta_cap", 0.15),
-                    min_modules=P.get("ccn_min_modules", 1),
-                )
-
-                # (A) choose if you want to train on constrained outputs
-                if P.get("ccn_use_for_loss", False):
-                    batch["preds"] = (
-                        probs_cons  # use coherent preds as the training output
-                    )
-
-                # (B) small auxiliary consistency loss (recommended)
-                w_aux = P.get("ccn_aux_w", 0.10)  # 0.0 to disable
-                if w_aux > 0:
-                    loss_aux = F.mse_loss(batch["preds"], probs_cons.detach())
-                else:
-                    loss_aux = torch.tensor(0.0, device=probs.device)
-
-            # copy preds for metrics (raw or coherent depending on (A) above)
             batch["preds_np"] = batch["preds"].clone().detach().cpu().numpy()
+                        # ---- Constraints warmup schedule (optional but recommended)
+            base_lambda_c = Z["lambda_constraints"]
+            warm = Z["constraints_warmup_epochs"]
+            if warm > 0 and epoch < warm:
+                lambda_c = base_lambda_c * float(epoch + 1) / float(warm)
+            else:
+                lambda_c = base_lambda_c
 
-            # base loss
+            # ---- Compute fuzzy logic penalties from probabilities (no projection)
+            loss_cons = constraints_loss(
+                preds=batch["preds"],                             # (B, C) probs
+                implication_pairs=Z["implication_rules"],
+                exclusion_pairs=Z["exclusion_rules"],
+                lambda_impl=Z["lambda_impl"],
+                lambda_excl=Z["lambda_excl"],
+                impl_weights=Z["impl_weights"],
+                excl_weights=Z["excl_weights"],
+                reduction="mean",
+            )
+
             batch = compute_batch_loss(batch, P, Z)
-
-            # add aux loss if enabled
-            if P.get("ccn_enable", False):
-                if P.get("ccn_aux_w", 0.10) > 0:
-                    batch["loss_tensor"] = (
-                        batch["loss_tensor"] + P.get("ccn_aux_w", 0.10) * loss_aux
-                    )
-
+            if Z["use_constraints"]:
+                batch["loss_tensor"] = batch["loss_tensor"] + (lambda_c * loss_cons)
         # backward pass:
         batch["loss_tensor"].backward()
         Z["optimizer"].step()
         # save current batch data:
         logger.update_phase_data(batch)
 
+        # optional: increment a global step counter if you want epoch+step in logs
+        Z["global_step"] = Z.get("global_step", 0) + 1
+
+
+    return _accum_finalize(accum)
+
 
 def run_eval_phase(model, P, Z, logger, epoch, phase):
     """
     Run one evaluation phase.
-
-    Parameters
-    model: Model to train.
-    P: Dictionary of parameters, which completely specify the training procedure.
-    Z: Dictionary of temporary objects used during training.
-    logger: Object used to track various metrics during training.
-    epoch: Integer index of the current epoch.
-    phase: String giving the phase name
     """
-
     assert phase in ["val", "test"]
     model.eval()
+    accum = _new_accum()
     for batch in Z["dataloaders"][phase]:
         # move data to GPU:
         batch["image"] = batch["image"].to(Z["device"], non_blocking=True)
-        batch["labels_np"] = (
-            batch["label_vec_obs"].clone().numpy()
-        )  # copy of labels for use in metrics
-        batch["label_vec_obs"] = batch["label_vec_obs"].to(
-            Z["device"], non_blocking=True
-        )
+        batch["labels_np"] = batch["label_vec_obs"].clone().numpy()
+        batch["label_vec_obs"] = batch["label_vec_obs"].to(Z["device"], non_blocking=True)
         # forward pass:
         with torch.set_grad_enabled(False):
-            batch['logits'] = model.f(batch['image'])
-            batch['preds'] = torch.sigmoid(batch['logits'])
-            if batch['preds'].dim() == 1:
-                batch['preds'] = torch.unsqueeze(batch['preds'], 0)
+            batch["logits"] = model.f(batch["image"])
+            batch["preds"] = torch.sigmoid(batch["logits"])
+            if batch["preds"].dim() == 1:
+                batch["preds"] = torch.unsqueeze(batch["preds"], 0)
+            batch["preds_np"] = batch["preds"].clone().detach().cpu().numpy()
+            batch["loss_np"] = -1
+            batch["reg_loss_np"] = -1
 
-            # CCN for eval (usually full ratio, same tau/cap)
-            if P.get('ccn_enable', False) and P.get('ccn_eval_replace', True):
-                ccn = Z['ccn']; group = ccn['group']; layer = ccn['layer']
-                probs = batch['preds']
-                probs_cons = apply_constraints_safe(
-                    layer, group, probs,
-                    epoch=P['num_epochs']-1, total_epochs=P['num_epochs'],  # full curriculum
-                    start_ratio=P.get('ccn_ratio_start', 0.30),
-                    end_ratio=P.get('ccn_ratio_end', 1.00),
-                    tau=P.get('ccn_goal_tau', 0.70),
-                    delta_cap=P.get('ccn_delta_cap', 0.15),
-                    min_modules=P.get('ccn_min_modules', 1)
-                )
-                batch['preds'] = probs_cons
-
-            batch['preds_np'] = batch['preds'].clone().detach().cpu().numpy()
-            batch['loss_np'] = -1
-            batch['reg_loss_np'] = -1
-
+            mean_impl, mean_excl = _penalties_mean(
+                batch["preds"], Z["implication_rules"], Z["exclusion_rules"]
+            )
+            rate_impl, rate_excl = _violation_rates(
+                batch["preds"], Z["implication_rules"], Z["exclusion_rules"], thr=0.5
+            )
+            _accum_update(accum, mean_impl, mean_excl, rate_impl, rate_excl)
         # save current batch data:
         logger.update_phase_data(batch)
+
+    return _accum_finalize(accum)
 
 
 def train(model, P, Z):
     """
     Train the model.
-
-    Parameters
-    P: Dictionary of parameters, which completely specify the training procedure.
-    Z: Dictionary of temporary objects used during training.
     """
-
     best_weights_f = copy.deepcopy(model.f.state_dict())
     best_weights_g = copy.deepcopy(model.g.state_dict())
     logger = train_logger(P)  # initialize logger
@@ -245,13 +290,12 @@ def train(model, P, Z):
         for phase in ["train", "val", "test"]:
             # reset phase metrics:
             logger.reset_phase_data()
-
-            # run one phase:
             t_init = time.time()
+
             if phase == "train":
-                run_train_phase(model, P, Z, logger, epoch, phase)
+                phase_logic = run_train_phase(model, P, Z, logger, epoch, phase)
             else:
-                run_eval_phase(model, P, Z, logger, epoch, phase)
+                phase_logic = run_eval_phase(model, P, Z, logger, epoch, phase)
 
             # save end-of-phase metrics:
             logger.compute_phase_metrics(phase, epoch, model.g.get_estimated_labels())
@@ -259,26 +303,92 @@ def train(model, P, Z):
             # print epoch status:
             logger.report(t_init, time.time(), phase, epoch)
 
+            try:
+                if phase_logic is not None:
+                    wandb.log({
+                        "epoch": epoch,
+                        f"{phase}/mean_impl_pen_epoch": phase_logic["mean_impl_pen"],
+                        f"{phase}/mean_excl_pen_epoch": phase_logic["mean_excl_pen"],
+                        f"{phase}/viol_impl_epoch":     phase_logic["viol_impl"],
+                        f"{phase}/viol_excl_epoch":     phase_logic["viol_excl"],
+                    }, commit=False)
+            except Exception:
+                pass
+
+            try:
+                # Attempt to log the stop metric (e.g., map) for this phase
+                stop_metric_name = P.get("stop_metric", None)
+                if stop_metric_name is not None:
+                    # For val/test we include val_set_variant; for train it might not apply
+                    variant = P.get("val_set_variant", None)
+                    try:
+                        metric_val = logger.get_stop_metric(phase, epoch, variant)
+                    except Exception:
+                        # fallback: try calling without variant
+                        metric_val = logger.get_stop_metric(phase, epoch, None)
+                    if metric_val is not None:
+                        wandb.log({"epoch": epoch, f"{phase}/{stop_metric_name}": float(metric_val)}, commit=True)
+                else:
+                    # fallback: try to dump any accessible summary metrics from logger
+                    # many loggers provide a dict; attempt to access logger.phase_metrics
+                    phase_metrics = getattr(logger, "phase_metrics", None)
+                    if isinstance(phase_metrics, dict):
+                        log_dict = {"epoch": epoch}
+                        for k, v in phase_metrics.items():
+                            log_dict[f"{phase}/{k}"] = float(v)
+                        wandb.log(log_dict, commit=True)
+            except Exception:
+                pass
+
             # update best epoch, if applicable:
-            new_best = logger.update_best_results(phase, epoch, P["val_set_variant"])
+            new_best = False
+            try:
+                new_best = logger.update_best_results(phase, epoch, P["val_set_variant"])
+            except Exception:
+                # if logger signature differs, still try to update best via returned info
+                try:
+                    new_best = logger.update_best_results(phase, epoch)
+                except Exception:
+                    new_best = False
+
             if new_best:
                 print("*** new best weights ***")
                 best_weights_f = copy.deepcopy(model.f.state_dict())
                 best_weights_g = copy.deepcopy(model.g.state_dict())
+                # === W&B ADDED: save & upload best weights as artifact ===
+                try:
+                    # ensure save path exists
+                    os.makedirs(P["save_path"], exist_ok=True)
+                    f_path = os.path.join(P["save_path"], f"best_model_state_f_epoch{epoch}.pt")
+                    g_path = os.path.join(P["save_path"], f"best_model_state_g_epoch{epoch}.pt")
+                    torch.save(best_weights_f, f_path)
+                    torch.save(best_weights_g, g_path)
+                    artifact = wandb.Artifact(f"{P['experiment_name']}_best_epoch_{epoch}", type="model")
+                    artifact.add_file(f_path)
+                    artifact.add_file(g_path)
+                    wandb.log_artifact(artifact)
+                except Exception:
+                    pass
 
     print("")
     print("*** TRAINING COMPLETE ***")
     print("Best epoch: {}".format(logger.best_epoch))
-    print(
-        "Best epoch validation score: {:.2f}".format(
-            logger.get_stop_metric("val", logger.best_epoch, P["val_set_variant"])
+    try:
+        print(
+            "Best epoch validation score: {:.2f}".format(
+                logger.get_stop_metric("val", logger.best_epoch, P["val_set_variant"])
+            )
         )
-    )
-    print(
-        "Best epoch test score:       {:.2f}".format(
-            logger.get_stop_metric("test", logger.best_epoch, "clean")
+    except Exception:
+        pass
+    try:
+        print(
+            "Best epoch test score:       {:.2f}".format(
+                logger.get_stop_metric("test", logger.best_epoch, "clean")
+            )
         )
-    )
+    except Exception:
+        pass
 
     return P, model, logger, best_weights_f, best_weights_g
 
@@ -286,18 +396,14 @@ def train(model, P, Z):
 def initialize_training_run(P, feature_extractor, linear_classifier, estimated_labels):
     """
     Set up for model training.
-
-    Parameters
-    P: Dictionary of parameters, which completely specify the training procedure.
-    feature_extractor: Feature extractor model to start from.
-    linear_classifier: Linear classifier model to start from.
-    estimated_labels: NumPy array containing estimated training set labels to start from (for ROLE).
     """
-
     os.makedirs(P["save_path"], exist_ok=True)
     np.random.seed(P["seed"])
 
     Z = {}
+
+    # constraints:
+    Z["use_constraints"] = P.get("use_constraints", False)
 
     # accelerator:
     Z["device"] = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -312,11 +418,6 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
     # save dataset-specific parameters:
     P["num_classes"] = Z["datasets"]["train"].num_classes
 
-    # CCN: build layer once (optional)
-    if P.get("ccn_enable", False):
-        print("Building CCN layer from rules")
-        build_ccn(P, Z)
-
     # dataloaders:
     Z["dataloaders"] = {}
     for phase in ["train", "val", "test"]:
@@ -328,6 +429,22 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
             num_workers=P["num_workers"],
             drop_last=True,
         )
+
+    # group, layer = init_constraints_layer("coco-rules.txt", P["num_classes"], Z["device"])
+    # Z["constraints"] = layer
+
+        # ---- (A) If you already have explicit pairs in P, use them:
+    Z["implication_rules"] = P.get("implication_rules", [])
+    Z["exclusion_rules"]   = P.get("exclusion_rules", [])
+    Z["impl_weights"]      = P.get("impl_weights", None)   # list of len |implication_rules|
+    Z["excl_weights"]      = P.get("excl_weights", None)   # list of len |exclusion_rules|
+
+    # Global constraint weight + warmup
+    Z["lambda_constraints"]        = float(P.get("lambda_constraints", 0.0))
+    Z["lambda_impl"]               = float(P.get("lambda_impl", 1.0))
+    Z["lambda_excl"]               = float(P.get("lambda_excl", 1.0))
+    Z["constraints_warmup_epochs"] = int(P.get("constraints_warmup_epochs", 0))
+
 
     # model:
     model = models.MultilabelModel(
@@ -351,18 +468,17 @@ def execute_training_run(
 ):
     """
     Initialize, run the training process, and save the results.
-
-    Parameters
-    P: Dictionary of parameters, which completely specify the training procedure.
-    feature_extractor: Feature extractor model to start from.
-    linear_classifier: Linear classifier model to start from.
-    estimated_labels: NumPy array containing estimated training set labels to start from (for ROLE).
     """
-
     P, Z, model = initialize_training_run(
         P, feature_extractor, linear_classifier, estimated_labels
     )
     model.to(Z["device"])
+
+    # === W&B ADDED: watch the model so W&B can track gradients/parameters ===
+    try:
+        wandb.watch(model, log="all", log_freq=100)
+    except Exception:
+        pass
 
     P, model, logger, best_weights_f, best_weights_g = train(model, P, Z)
 
@@ -401,7 +517,7 @@ if __name__ == "__main__":
     lookup = {
         "feat_dim": {"resnet50": 2048},
         "expected_num_pos": {"pascal": 1.5, "coco": 2.9, "nuswide": 1.9, "cub": 31.4},
-        "linear_init_params": {  # best learning rate and batch size for linear_fixed_features phase of linear_init
+        "linear_init_params": {
             "an_ls": {
                 "pascal": {"linear_init_lr": 1e-4, "linear_init_bsize": 8},
                 "coco": {"linear_init_lr": 1e-4, "linear_init_bsize": 8},
@@ -419,6 +535,9 @@ if __name__ == "__main__":
 
     P = {}
 
+    # Constraints:
+    P["use_constraints"] = True
+
     # Top-level parameters:
     P["dataset"] = "pascal"  # pascal, coco, nuswide, cub
     P["loss"] = "role"  # bce, bce_ls, iun, iu, pr, an, an_ls, wan, epr, role
@@ -430,51 +549,27 @@ if __name__ == "__main__":
     P["load_path"] = "./data"
     P["save_path"] = "./results"
 
-        # ----- CCN config -----
-    P['ccn_enable'] = True
-    P['ccn_rules_path'] = 'rules.txt'   # <- put your strict file here
-    P['ccn_centrality'] = 'katz'                      # or 'degree'
-    P['ccn_ratio_start'] = 0.30
-    P['ccn_ratio_end']   = 1.00
-    P['ccn_goal_tau']    = 0.70
-    P['ccn_delta_cap']   = 0.15
-    P['ccn_min_modules'] = 1
-
-    # train on constrained preds? (usually False; use aux instead)
-    P['ccn_use_for_loss'] = False
-
-    # small aux to nudge raw preds towards coherent ones
-    P['ccn_aux_w'] = 0.10
-
-    # in eval, replace preds with constrained version for metrics
-    P['ccn_eval_replace'] = True
-
-
     # Optimization parameters:
     if P["train_mode"] == "linear_init":
-        P["linear_init_lr"] = lookup["linear_init_params"][P["loss"]][P["dataset"]][
-            "linear_init_lr"
-        ]
-        P["linear_init_bsize"] = lookup["linear_init_params"][P["loss"]][P["dataset"]][
-            "linear_init_bsize"
-        ]
-    P["lr_mult"] = 10.0  # learning rate multiplier for the parameters of g
-    P["stop_metric"] = "map"  # metric used to select the best epoch
+        P["linear_init_lr"] = lookup["linear_init_params"][P["loss"]][P["dataset"]]["linear_init_lr"]
+        P["linear_init_bsize"] = lookup["linear_init_params"][P["loss"]][P["dataset"]]["linear_init_bsize"]
+    P["lr_mult"] = 10.0
+    P["stop_metric"] = "map"
 
     # Loss-specific parameters:
-    P["ls_coef"] = 0.1  # label smoothing coefficient
+    P["ls_coef"] = 0.1
 
     # Additional parameters:
-    P["seed"] = 1200  # overall numpy seed
-    P["use_pretrained"] = True  # True, False
-    P["num_workers"] = 4
+    P["seed"] = 1200
+    P["use_pretrained"] = True
+    P["num_workers"] = 0
 
     # Dataset parameters:
-    P["split_seed"] = 1200  # seed for train / val splitting
-    P["val_frac"] = 0.2  # fraction of train set to split off for val
-    P["ss_seed"] = 999  # seed for subsampling
-    P["ss_frac_train"] = 1.0  # fraction of training set to subsample
-    P["ss_frac_val"] = 1.0  # fraction of val set to subsample
+    P["split_seed"] = 1200
+    P["val_frac"] = 0.2
+    P["ss_seed"] = 999
+    P["ss_frac_train"] = 1.0
+    P["ss_frac_val"] = 1.0
 
     # Dependent parameters:
     if P["loss"] in ["bce", "bce_ls"]:
@@ -501,12 +596,31 @@ if __name__ == "__main__":
     P["feature_extractor_arch"] = "resnet50"
     P["feat_dim"] = lookup["feat_dim"][P["feature_extractor_arch"]]
     P["expected_num_pos"] = lookup["expected_num_pos"][P["dataset"]]
-    P["train_feats_file"] = "./data/{}/train_features_imagenet_{}.npy".format(
-        P["dataset"], P["feature_extractor_arch"]
+    P["train_feats_file"] = "./data/{}/train_features_imagenet_{}.npy".format(P["dataset"], P["feature_extractor_arch"])
+    P["val_feats_file"] = "./data/{}/val_features_imagenet_{}.npy".format(P["dataset"], P["feature_extractor_arch"])
+    P["lambda_constraints"] = 0.5          # global multiplier for constraints block
+    P["lambda_impl"] = 1.0                 # relative weight for implication
+    P["lambda_excl"] = 1.0                 # relative weight for exclusion
+    P["constraints_warmup_epochs"] = 3     # linearly ramp λ_c from 0 → λ_c over first N epochs
+
+    # Provide rules either as explicit index pairs…
+    P["implication_rules"] = [(0, 20), (1, 20), (3, 20), (5, 20), (6, 20), (13, 20), (18, 20), (2, 21), (7, 21), (9, 21), (11, 21), (12, 21), (16, 21), (4, 22), (8, 22), (10, 22), (15, 22), (17, 22), (19, 22)]
+
+    # P["exclusion_rules"]   = [(day_idx, night_idx)]
+
+    run = wandb.init(
+        # Set the wandb entity where your project will be logged (generally your team name).
+        entity="ibrahimkaliljh-student",
+        # Set the wandb project where this run will be logged.
+        project="spmll_thesis_logical_constraints",
+        # Track hyperparameters and run metadata.
+        config=P,
     )
-    P["val_feats_file"] = "./data/{}/val_features_imagenet_{}.npy".format(
-        P["dataset"], P["feature_extractor_arch"]
-    )
+    # === W&B ADDED: ensure config is updated (safer if edit after init) ===
+    try:
+        wandb.config.update(P)
+    except Exception:
+        pass
 
     # run training process:
     best_params = None
@@ -521,73 +635,41 @@ if __name__ == "__main__":
         print("- linear_init_bsize: {}".format(P["linear_init_bsize"]))
         P["bsize"] = P["linear_init_bsize"]
         P["lr"] = P["linear_init_lr"]
-        P["save_path"] = (
-            "./results/" + P["experiment_name"] + "_" + now_str + "_" + P["dataset"]
-        )
+        P["save_path"] = "./results/" + P["experiment_name"] + "_" + now_str + "_" + P["dataset"]
         os.makedirs(P["save_path"], exist_ok=False)
         P_temp = copy.deepcopy(P)  # re-set hyperparameter dict
+        # after linear init:
         (
             feature_extractor_init,
             linear_classifier_init,
             estimated_labels_init,
             logs,
         ) = execute_training_run(P_temp, feature_extractor=None, linear_classifier=None)
+        print("saving objects")
+        save_obj = (feature_extractor_init, linear_classifier_init, estimated_labels_init, logs)
+        with open("linear_init/linear_init_pascal.pkl", "wb") as f:
+            pickle.dump(save_obj, f)
         print("fine-tuning from trained linear classifier")
-    for bsize in [16]:
-        for lr in [1e-4]:
 
-            now_str = datetime.datetime.now().strftime("%Y_%m_%d_%X").replace(":", "-")
-            P["bsize"] = bsize
-            P["lr"] = lr
-            P["save_path"] = (
-                "./results/" + P["experiment_name"] + "_" + now_str + "_" + P["dataset"]
-            )
-            P_temp = copy.deepcopy(P)  # re-set hyperparameter dict
-            if P["train_mode"] == "linear_init":
-                P_temp["save_path"] = P["save_path"] + "_fine_tuned_from_linear"
-                os.makedirs(P_temp["save_path"], exist_ok=False)
-                P_temp["train_mode"] = "end_to_end"
-                P_temp["num_epochs"] = 10
-                P_temp["freeze_feature_extractor"] = False
-                P_temp["use_feats"] = False
-                P_temp["arch"] = "resnet50"
-                (feature_extractor, linear_classifier, estimated_labels, logs) = (
-                    execute_training_run(
-                        P_temp,
-                        feature_extractor=feature_extractor_init,
-                        linear_classifier=linear_classifier_init,
-                        estimated_labels=estimated_labels_init,
-                    )
-                )
-            else:
-                os.makedirs(P["save_path"], exist_ok=False)
-                (feature_extractor, linear_classifier, estimated_labels, logs) = (
-                    execute_training_run(
-                        P_temp, feature_extractor=None, linear_classifier=None
-                    )
-                )
-            # keep track of the best run:
-            best_epoch = np.argmax(
-                [
-                    logs["metrics"]["val"][epoch][
-                        P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
-                    ]
-                    for epoch in range(P_temp["num_epochs"])
-                ]
-            )
-            val_score = logs["metrics"]["val"][best_epoch][
-                P_temp["stop_metric"] + "_" + P_temp["val_set_variant"]
-            ]
-            test_score = logs["metrics"]["test"][best_epoch][
-                P_temp["stop_metric"] + "_clean"
-            ]
-            if val_score > best_val_score:
-                best_val_score = val_score
-                best_test_score = test_score
-                best_params = copy.deepcopy(P_temp)
-    # report the best run:
-    print("best run: {}".format(best_params["save_path"]))
-    print("- learning rate: {}".format(best_params["lr"]))
-    print("- batch size:    {}".format(best_params["bsize"]))
-    print("- val score:     {}".format(best_val_score))
-    print("- test score:    {}".format(best_test_score))
+    print("Results without constraints:")
+    # === W&B ADDED: Attempt to log final summary to W&B ===
+    try:
+        wandb.log({"final/best_val_score": best_val_score, "final/best_test_score": best_test_score})
+    except Exception:
+        pass
+
+    try:
+        print("best run: {}".format(best_params["save_path"]))
+        print("- learning rate: {}".format(best_params["lr"]))
+        print("- batch size:    {}".format(best_params["bsize"]))
+        print("- val score:     {}".format(best_val_score))
+        print("- test score:    {}".format(best_test_score))
+    except Exception:
+        # if best_params is None, just skip
+        pass
+
+    # === W&B ADDED: finish run cleanly ===
+    try:
+        wandb.finish()
+    except Exception:
+        pass

@@ -1,0 +1,87 @@
+vehicle :- aeroplane
+vehicle :- bicycle
+vehicle :- boat
+vehicle :- bus
+vehicle :- car
+vehicle :- motorbike
+vehicle :- train
+
+animal :- bird
+animal :- cat
+animal :- cow
+animal :- dog
+animal :- horse
+animal :- sheep
+animal :- person
+
+indoor :- bottle
+indoor :- chair
+indoor :- diningtable
+indoor :- sofa
+indoor :- tvmonitor
+indoor :- pottedplant
+
+
+NOT aeroplane :- bicycle
+NOT bicycle :- aeroplane
+
+NOT aeroplane :- bird
+NOT bird :- aeroplane
+
+NOT aeroplane :- bottle
+NOT bottle :- aeroplane
+
+NOT aeroplane :- cat
+NOT cat :- aeroplane
+
+NOT aeroplane :- chair
+NOT chair :- aeroplane
+
+NOT aeroplane :- cow
+NOT cow :- aeroplane
+
+NOT aeroplane :- diningtable
+NOT diningtable :- aeroplane
+
+NOT aeroplane :- dog
+NOT dog :- aeroplane
+
+NOT aeroplane :- horse
+NOT horse :- aeroplane
+
+NOT aeroplane :- motorbike
+NOT motorbike :- aeroplane
+
+NOT aeroplane :- pottedplant
+NOT pottedplant :- aeroplane
+
+NOT aeroplane :- sheep
+NOT sheep :- aeroplane
+
+NOT aeroplane :- sofa
+NOT sofa :- aeroplane
+
+NOT aeroplane :- train
+NOT train :- aeroplane
+
+NOT aeroplane :- tvmonitor
+NOT tvmonitor :- aeroplane
+
+NOT aeroplane :- animal
+NOT animal :- aeroplane
+
+NOT aeroplane :- indoor
+NOT indoor :- aeroplane
+
+
+NOT bicycle :- diningtable
+NOT diningtable :- bicycle
+
+NOT bicycle :- dog
+NOT dog :- bicycle
+
+NOT bicycle :- horse
+NOT horse :- bicycle
+
+NOT bicycle :- sheep
+NOT sheep :- bicycle

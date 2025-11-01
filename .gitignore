@@ -11,3 +11,6 @@ README_LOGICAL_CONSTRAINTS.md
 *.pkl
 venv
 venv_*/
+
+.idea*/
+wandb/

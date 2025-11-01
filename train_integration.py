@@ -1,16 +1,8 @@
-import os
-import copy
-import time
-import json
-import numpy as np
-import torch
-import datasets
-import models
-from losses import compute_batch_loss
-import datetime
-from instrumentation import train_logger
-import pickle
-import wandb 
+"""
+Integration code to add to your train.py
+
+Replace the constraints-related code in train.py with this.
+"""
 
 import torch
 from fuzzy_penalties import (
@@ -18,6 +10,15 @@ from fuzzy_penalties import (
     compute_violation_metrics
 )
 
+# ============================================================================
+# ADD THIS TO imports in train.py
+# ============================================================================
+# from fuzzy_penalties import compute_fuzzy_constraints_loss, compute_violation_metrics
+
+
+# ============================================================================
+# REPLACE run_train_phase function with this:
+# ============================================================================
 
 def run_train_phase(model, P, Z, logger, epoch, phase):
     """
@@ -151,6 +152,10 @@ def run_train_phase(model, P, Z, logger, epoch, phase):
     return epoch_violations
 
 
+# ============================================================================
+# REPLACE run_eval_phase function with this:
+# ============================================================================
+
 def run_eval_phase(model, P, Z, logger, epoch, phase):
     """
     Run one evaluation phase (val/test) with violation tracking.
@@ -230,34 +235,38 @@ def run_eval_phase(model, P, Z, logger, epoch, phase):
     return epoch_violations
 
 
+# ============================================================================
+# UPDATE train function - add W&B logging:
+# ============================================================================
 
 def train(model, P, Z):
     """
-    Train the model.
+    Train the model with enhanced W&B logging.
     """
     best_weights_f = copy.deepcopy(model.f.state_dict())
     best_weights_g = copy.deepcopy(model.g.state_dict())
-    logger = train_logger(P)  # initialize logger
-
+    logger = train_logger(P)
+    
     for epoch in range(P["num_epochs"]):
         print("Epoch {}/{}".format(epoch, P["num_epochs"] - 1))
-
+        
         for phase in ["train", "val", "test"]:
-            # reset phase metrics:
+            # Reset phase metrics
             logger.reset_phase_data()
             t_init = time.time()
-
-            # run phase:
+            
+            # Run phase
             if phase == "train":
                 phase_violations = run_train_phase(model, P, Z, logger, epoch, phase)
             else:
                 phase_violations = run_eval_phase(model, P, Z, logger, epoch, phase)
-            # compute epoch metrics:
+            
+            # Compute phase metrics
             logger.compute_phase_metrics(phase, epoch, model.g.get_estimated_labels())
-
-            # print epoch status:
+            
+            # Print epoch status
             logger.report(t_init, time.time(), phase, epoch)
-
+            
             # ============================================================
             # W&B LOGGING - COMPREHENSIVE
             # ============================================================
@@ -267,12 +276,7 @@ def train(model, P, Z):
                 # Get stop metric (mAP)
                 stop_metric_name = P.get("stop_metric", "map")
                 try:
-                    if phase == "train":
-                        # For train phase, use the train_set_variant (clean/observed)
-                        variant = P.get("train_set_variant", "clean")
-                    else:
-                        # For val/test phases, use val_set_variant
-                        variant = P.get("val_set_variant", "clean")
+                    variant = P.get("val_set_variant", None) if phase in ["val", "test"] else None
                     metric_val = logger.get_stop_metric(phase, epoch, variant)
                 except:
                     metric_val = None
@@ -366,32 +370,29 @@ def train(model, P, Z):
     return P, model, logger, best_weights_f, best_weights_g
 
 
+# ============================================================================
+# UPDATE initialize_training_run - add fuzzy config:
+# ============================================================================
+
 def initialize_training_run(P, feature_extractor, linear_classifier, estimated_labels):
     """
-    Set up for model training.
+    Set up for model training with fuzzy logic support.
     """
     os.makedirs(P["save_path"], exist_ok=True)
     np.random.seed(P["seed"])
-
+    
     Z = {}
-
-    # constraints:
-    Z["use_constraints"] = P.get("use_constraints", False)
-
-    # accelerator:
+    
+    # Device
     Z["device"] = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print("Using device: {}".format(Z["device"]))
-
-    # data:
+    
+    # Data
     Z["datasets"] = datasets.get_data(P)
-
-    # observed label matrix:
     observed_label_matrix = Z["datasets"]["train"].label_matrix_obs
-
-    # save dataset-specific parameters:
     P["num_classes"] = Z["datasets"]["train"].num_classes
-
-    # dataloaders:
+    
+    # Dataloaders
     Z["dataloaders"] = {}
     for phase in ["train", "val", "test"]:
         Z["dataloaders"][phase] = torch.utils.data.DataLoader(
@@ -402,7 +403,7 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
             num_workers=P["num_workers"],
             drop_last=True,
         )
-
+    
     # ---- Fuzzy logic constraints configuration ----
     Z["use_constraints"] = P.get("use_constraints", False)
     Z["fuzzy_type"] = P.get("fuzzy_type", "lukasiewicz")  # or "product"
@@ -427,14 +428,13 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
         print(f"  Warmup epochs: {Z['constraints_warmup_epochs']}")
         print(f"  Implication rules: {len(Z['implication_rules'])}")
         print(f"  Exclusion rules: {len(Z['exclusion_rules'])}")
-
-
-    # model:
+    
+    # Model
     model = models.MultilabelModel(
         P, feature_extractor, linear_classifier, observed_label_matrix, estimated_labels
     )
-
-    # optimization objects:
+    
+    # Optimization
     f_params = [param for param in list(model.f.parameters()) if param.requires_grad]
     g_params = [param for param in list(model.g.parameters()) if param.requires_grad]
     opt_params = [
@@ -442,217 +442,5 @@ def initialize_training_run(P, feature_extractor, linear_classifier, estimated_l
         {"params": g_params, "lr": P["lr_mult"] * P["lr"]},
     ]
     Z["optimizer"] = torch.optim.Adam(opt_params, lr=P["lr"])
-
+    
     return P, Z, model
-
-
-def execute_training_run(
-    P, feature_extractor, linear_classifier, estimated_labels=None
-):
-    """
-    Initialize, run the training process, and save the results.
-    """
-    P, Z, model = initialize_training_run(
-        P, feature_extractor, linear_classifier, estimated_labels
-    )
-    model.to(Z["device"])
-
-    # === W&B ADDED: watch the model so W&B can track gradients/parameters ===
-    try:
-        wandb.watch(model, log="all", log_freq=100)
-    except Exception:
-        pass
-
-    P, model, logger, best_weights_f, best_weights_g = train(model, P, Z)
-
-    print(
-        "\nSaving best weights for f to {}/best_model_state_f.pt".format(P["save_path"])
-    )
-    torch.save(best_weights_f, os.path.join(P["save_path"], "best_model_state_f.pt"))
-    print(
-        "\nSaving best weights for g to {}/best_model_state_g.pt".format(P["save_path"])
-    )
-    torch.save(best_weights_g, os.path.join(P["save_path"], "best_model_state_g.pt"))
-
-    final_logs = logger.get_logs()
-    print("\nSaving session data to {}/logs.json".format(P["save_path"]))
-    with open(os.path.join(P["save_path"], "logs.json"), "w") as f:
-        json.dump(final_logs, f)
-
-    print("\nSaving session data to {}/params.json".format(P["save_path"]))
-    with open(os.path.join(P["save_path"], "params.json"), "w") as f:
-        json.dump(P, f)
-
-    print("\nReverting model to best weights.")
-    model.f.load_state_dict(best_weights_f)
-    model.g.load_state_dict(best_weights_g)
-
-    return (
-        model.f.feature_extractor,
-        model.f.linear_classifier,
-        model.g.get_estimated_labels(),
-        final_logs,
-    )
-
-
-if __name__ == "__main__":
-
-    lookup = {
-        "feat_dim": {"resnet50": 2048},
-        "expected_num_pos": {"pascal": 1.5, "coco": 2.9, "nuswide": 1.9, "cub": 31.4},
-        "linear_init_params": {
-            "an_ls": {
-                "pascal": {"linear_init_lr": 1e-4, "linear_init_bsize": 8},
-                "coco": {"linear_init_lr": 1e-4, "linear_init_bsize": 8},
-                "nuswide": {"linear_init_lr": 1e-4, "linear_init_bsize": 16},
-                "cub": {"linear_init_lr": 1e-4, "linear_init_bsize": 8},
-            },
-            "role": {
-                "pascal": {"linear_init_lr": 1e-3, "linear_init_bsize": 16},
-                "coco": {"linear_init_lr": 1e-3, "linear_init_bsize": 16},
-                "nuswide": {"linear_init_lr": 1e-3, "linear_init_bsize": 16},
-                "cub": {"linear_init_lr": 1e-3, "linear_init_bsize": 8},
-            },
-        },
-    }
-
-    P = {}
-
-    # Constraints:
-    P["use_constraints"] = True
-
-    # Top-level parameters:
-    P["dataset"] = "pascal"  # pascal, coco, nuswide, cub
-    P["loss"] = "role"  # bce, bce_ls, iun, iu, pr, an, an_ls, wan, epr, role
-    P["train_mode"] = "linear_init"  # linear_fixed_features, end_to_end, linear_init
-    P["val_set_variant"] = "clean"  # clean, observed
-
-    # Paths and filenames:
-    P["experiment_name"] = "multi_label_experiment"
-    P["load_path"] = "./data"
-    P["save_path"] = "./results"
-
-    # Optimization parameters:
-    if P["train_mode"] == "linear_init":
-        P["linear_init_lr"] = lookup["linear_init_params"][P["loss"]][P["dataset"]]["linear_init_lr"]
-        P["linear_init_bsize"] = lookup["linear_init_params"][P["loss"]][P["dataset"]]["linear_init_bsize"]
-    P["lr_mult"] = 10.0
-    P["stop_metric"] = "map"
-
-    # Loss-specific parameters:
-    P["ls_coef"] = 0.1
-
-    # Additional parameters:
-    P["seed"] = 1200
-    P["use_pretrained"] = True
-    P["num_workers"] = 0
-
-    # Dataset parameters:
-    P["split_seed"] = 1200
-    P["val_frac"] = 0.2
-    P["ss_seed"] = 999
-    P["ss_frac_train"] = 1.0
-    P["ss_frac_val"] = 1.0
-
-    # Dependent parameters:
-    if P["loss"] in ["bce", "bce_ls"]:
-        P["train_set_variant"] = "clean"
-    else:
-        P["train_set_variant"] = "observed"
-    if P["train_mode"] == "end_to_end":
-        P["num_epochs"] = 10
-        P["freeze_feature_extractor"] = False
-        P["use_feats"] = False
-        P["arch"] = "resnet50"
-    elif P["train_mode"] == "linear_init":
-        P["num_epochs"] = 25
-        P["freeze_feature_extractor"] = True
-        P["use_feats"] = True
-        P["arch"] = "linear"
-    elif P["train_mode"] == "linear_fixed_features":
-        P["num_epochs"] = 25
-        P["freeze_feature_extractor"] = True
-        P["use_feats"] = True
-        P["arch"] = "linear"
-    else:
-        raise NotImplementedError("Unknown training mode.")
-    P["feature_extractor_arch"] = "resnet50"
-    P["feat_dim"] = lookup["feat_dim"][P["feature_extractor_arch"]]
-    P["expected_num_pos"] = lookup["expected_num_pos"][P["dataset"]]
-    P["train_feats_file"] = "./data/{}/train_features_imagenet_{}.npy".format(P["dataset"], P["feature_extractor_arch"])
-    P["val_feats_file"] = "./data/{}/val_features_imagenet_{}.npy".format(P["dataset"], P["feature_extractor_arch"])
-    P["lambda_constraints"] = 0.5          # global multiplier for constraints block
-    P["lambda_impl"] = 1.0                 # relative weight for implication
-    P["lambda_excl"] = 1.0                 # relative weight for exclusion
-    P["constraints_warmup_epochs"] = 3     # linearly ramp λ_c from 0 → λ_c over first N epochs
-
-    # Provide rules either as explicit index pairs…
-    P["implication_rules"] = [(0, 20), (1, 20), (3, 20), (5, 20), (6, 20), (13, 20), (18, 20), (2, 21), (7, 21), (9, 21), (11, 21), (12, 21), (16, 21), (4, 22), (8, 22), (10, 22), (15, 22), (17, 22), (19, 22)]
-
-    # P["exclusion_rules"]   = [(day_idx, night_idx)]
-
-    run = wandb.init(
-        # Set the wandb entity where your project will be logged (generally your team name).
-        entity="ibrahimkaliljh-student",
-        # Set the wandb project where this run will be logged.
-        project="spmll_thesis_logical_constraints",
-        # Track hyperparameters and run metadata.
-        config=P,
-    )
-    # === W&B ADDED: ensure config is updated (safer if edit after init) ===
-    try:
-        wandb.config.update(P)
-    except Exception:
-        pass
-
-    # run training process:
-    best_params = None
-    best_lr = None
-    best_bsize = None
-    best_val_score = -np.inf
-    best_test_score = None
-    now_str = datetime.datetime.now().strftime("%Y_%m_%d_%X").replace(":", "-")
-    if P["train_mode"] == "linear_init":
-        print("training linear classifier with fixed hyperparameters:")
-        print("- linear_init_lr: {}".format(P["linear_init_lr"]))
-        print("- linear_init_bsize: {}".format(P["linear_init_bsize"]))
-        P["bsize"] = P["linear_init_bsize"]
-        P["lr"] = P["linear_init_lr"]
-        P["save_path"] = "./results/" + P["experiment_name"] + "_" + now_str + "_" + P["dataset"]
-        os.makedirs(P["save_path"], exist_ok=False)
-        P_temp = copy.deepcopy(P)  # re-set hyperparameter dict
-        # after linear init:
-        (
-            feature_extractor_init,
-            linear_classifier_init,
-            estimated_labels_init,
-            logs,
-        ) = execute_training_run(P_temp, feature_extractor=None, linear_classifier=None)
-        print("saving objects")
-        save_obj = (feature_extractor_init, linear_classifier_init, estimated_labels_init, logs)
-        with open("linear_init/linear_init_pascal.pkl", "wb") as f:
-            pickle.dump(save_obj, f)
-        print("fine-tuning from trained linear classifier")
-
-    print("Results without constraints:")
-    # === W&B ADDED: Attempt to log final summary to W&B ===
-    try:
-        wandb.log({"final/best_val_score": best_val_score, "final/best_test_score": best_test_score})
-    except Exception:
-        pass
-
-    try:
-        print("best run: {}".format(best_params["save_path"]))
-        print("- learning rate: {}".format(best_params["lr"]))
-        print("- batch size:    {}".format(best_params["bsize"]))
-        print("- val score:     {}".format(best_val_score))
-        print("- test score:    {}".format(best_test_score))
-    except Exception:
-        # if best_params is None, just skip
-        pass
-
-    # === W&B ADDED: finish run cleanly ===
-    try:
-        wandb.finish()
-    except Exception:
-        pass

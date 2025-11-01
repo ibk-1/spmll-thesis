@@ -200,7 +200,6 @@ def loss_role(batch, P, Z):
 
 
 
-
 def loss_role_logics_improved(batch, P, Z):
     # Your existing code up to regularizers...
     preds = batch['preds']
@@ -233,10 +232,10 @@ def loss_role_logics_improved(batch, P, Z):
     epoch = Z.get('current_epoch', 0.01)
     
     # Start with very gentle constraints
-    base_consistency_weight = P.get('consistency_coef', 0.3)  # Much smaller than usual
+    base_consistency_weight = P.get('consistency_coef', 0.2)  # Much smaller than usual
     
     # Curriculum learning: gradually increase constraint influence
-    curriculum_factor = min(1.0, epoch / 10.0)
+    curriculum_factor = min(1.0, epoch / 10.0) 
     
     # Calculate consistency losses
     consistency_loss_f = F.mse_loss(preds, preds_hat.detach()) 
@@ -250,69 +249,6 @@ def loss_role_logics_improved(batch, P, Z):
     
     return loss_mtx, reg_loss
 
-# It's good practice to define a numerically stable neg_log helper
-def neg_log(x, eps=1e-8):
-    """Calculates the negative logarithm of a tensor, clamping values to avoid log(0)."""
-    return -torch.log(x.clamp(min=eps))
-
-def loss_role_logics_optimized(batch, P, Z):
-    """
-    An optimized version of the loss function focusing on vectorization,
-    numerical stability, and clarity.
-    """
-    # --- 1. Unpack Tensors ---
-    preds = batch['preds']
-    observed_labels = batch['label_vec_obs'] # Assumed to be a binary mask (0s and 1s)
-    estimated_labels = batch['label_vec_est']
-    
-    # --- 2. Apply Constraints ---
-    # This part remains the same as it depends on the custom layer logic.
-    layer = Z['constraints']
-    preds_hat = layer(preds, iterative=True)
-    est_hat = layer(estimated_labels, iterative=True)
-
-    # --- 3. Calculate Loss Components ---
-    
-    # Positive label losses (vectorized for performance)
-    # Instead of creating a zero tensor and indexing, we multiply by the binary mask directly.
-    # This is significantly faster, especially on a GPU.
-    loss_pos_1 = neg_log(preds) * observed_labels
-    loss_pos_2 = neg_log(estimated_labels) * observed_labels
-    
-    # Cross-learning losses (using built-in BCE for stability and speed)
-    # F.binary_cross_entropy is more numerically stable than the manual formula.
-    # 'reduction="none"' ensures it returns a loss matrix of the same shape.
-    loss_cross_1 = F.binary_cross_entropy(preds, est_hat.detach(), reduction='none')
-    loss_cross_2 = F.binary_cross_entropy(estimated_labels, preds_hat.detach(), reduction='none')
-
-    # --- 4. Calculate Regularization and Consistency ---
-
-    # Regularization loss (code is fine, slightly consolidated for readability)
-    reg_1 = expected_positive_regularizer(preds, P['expected_num_pos'], norm='2')
-    reg_2 = expected_positive_regularizer(estimated_labels, P['expected_num_pos'], norm='2')
-    reg_loss_base = (reg_1 + reg_2) / (2 * (P['num_classes'] ** 2))
-
-    # Consistency loss (with curriculum learning)
-    epoch = Z.get('current_epoch', 0.0)
-    base_consistency_weight = P.get('consistency_coef', 0.3)
-    curriculum_factor = min(1.0, epoch / 10.0) # Simple and clear
-    
-    # Using detach() directly in the loss function call
-    consistency_loss = F.mse_loss(preds, preds_hat.detach()) + F.mse_loss(estimated_labels, est_hat.detach())
-    total_consistency = base_consistency_weight * curriculum_factor * consistency_loss
-    
-    # --- 5. Combine and Return ---
-    
-    # Final regularization loss
-    reg_loss = reg_loss_base + total_consistency
-    
-    # Final main loss matrix
-    loss_mtx = 0.5 * (loss_pos_1 + loss_pos_2 + loss_cross_1 + loss_cross_2)
-    
-    return loss_mtx, reg_loss
-
-
-
 
 loss_functions = {
     'bce': loss_bce,
@@ -325,7 +261,7 @@ loss_functions = {
     'wan': loss_wan,
     'epr': loss_epr,
     'role': loss_role,
-    'role_logics': loss_role_logics_optimized
+    'role_logics': loss_role_logics_improved
 }
 
 '''

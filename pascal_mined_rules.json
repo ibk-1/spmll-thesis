@@ -1,0 +1,507 @@
+{
+  "dataset_stats": {
+    "num_samples": 5717,
+    "num_classes": 23,
+    "avg_labels_per_image": 2.4080810546875,
+    "class_frequencies": {
+      "aeroplane": 327,
+      "bicycle": 268,
+      "bird": 395,
+      "boat": 260,
+      "bottle": 365,
+      "bus": 213,
+      "car": 590,
+      "cat": 539,
+      "chair": 566,
+      "cow": 151,
+      "diningtable": 269,
+      "dog": 632,
+      "horse": 237,
+      "motorbike": 265,
+      "person": 1994,
+      "pottedplant": 269,
+      "sheep": 171,
+      "sofa": 257,
+      "train": 273,
+      "tvmonitor": 290,
+      "vehicle": 1992,
+      "animal": 2082,
+      "indoor": 1362
+    }
+  },
+  "implication_rules": [
+    {
+      "rule_id": 0,
+      "from_class": 4,
+      "from_name": "bottle",
+      "to_class": 22,
+      "to_name": "indoor",
+      "confidence": 1.0,
+      "lift": 4.197503547078761
+    },
+    {
+      "rule_id": 1,
+      "from_class": 8,
+      "from_name": "chair",
+      "to_class": 22,
+      "to_name": "indoor",
+      "confidence": 1.0,
+      "lift": 4.197503547078761
+    },
+    {
+      "rule_id": 2,
+      "from_class": 10,
+      "from_name": "diningtable",
+      "to_class": 22,
+      "to_name": "indoor",
+      "confidence": 1.0,
+      "lift": 4.197503547078761
+    },
+    {
+      "rule_id": 3,
+      "from_class": 15,
+      "from_name": "pottedplant",
+      "to_class": 22,
+      "to_name": "indoor",
+      "confidence": 1.0,
+      "lift": 4.197503547078761
+    },
+    {
+      "rule_id": 4,
+      "from_class": 17,
+      "from_name": "sofa",
+      "to_class": 22,
+      "to_name": "indoor",
+      "confidence": 1.0,
+      "lift": 4.197503547078761
+    },
+    {
+      "rule_id": 5,
+      "from_class": 19,
+      "from_name": "tvmonitor",
+      "to_class": 22,
+      "to_name": "indoor",
+      "confidence": 1.0,
+      "lift": 4.197503547078761
+    },
+    {
+      "rule_id": 6,
+      "from_class": 0,
+      "from_name": "aeroplane",
+      "to_class": 20,
+      "to_name": "vehicle",
+      "confidence": 1.0,
+      "lift": 2.869979802458568
+    },
+    {
+      "rule_id": 7,
+      "from_class": 1,
+      "from_name": "bicycle",
+      "to_class": 20,
+      "to_name": "vehicle",
+      "confidence": 1.0,
+      "lift": 2.869979802458568
+    },
+    {
+      "rule_id": 8,
+      "from_class": 3,
+      "from_name": "boat",
+      "to_class": 20,
+      "to_name": "vehicle",
+      "confidence": 1.0,
+      "lift": 2.869979802458568
+    },
+    {
+      "rule_id": 9,
+      "from_class": 5,
+      "from_name": "bus",
+      "to_class": 20,
+      "to_name": "vehicle",
+      "confidence": 1.0,
+      "lift": 2.869979802458568
+    },
+    {
+      "rule_id": 10,
+      "from_class": 6,
+      "from_name": "car",
+      "to_class": 20,
+      "to_name": "vehicle",
+      "confidence": 1.0,
+      "lift": 2.869979802458568
+    },
+    {
+      "rule_id": 11,
+      "from_class": 13,
+      "from_name": "motorbike",
+      "to_class": 20,
+      "to_name": "vehicle",
+      "confidence": 1.0,
+      "lift": 2.869979802458568
+    },
+    {
+      "rule_id": 12,
+      "from_class": 18,
+      "from_name": "train",
+      "to_class": 20,
+      "to_name": "vehicle",
+      "confidence": 1.0,
+      "lift": 2.869979802458568
+    },
+    {
+      "rule_id": 13,
+      "from_class": 2,
+      "from_name": "bird",
+      "to_class": 21,
+      "to_name": "animal",
+      "confidence": 1.0,
+      "lift": 2.745917368378886
+    },
+    {
+      "rule_id": 14,
+      "from_class": 7,
+      "from_name": "cat",
+      "to_class": 21,
+      "to_name": "animal",
+      "confidence": 1.0,
+      "lift": 2.745917368378886
+    },
+    {
+      "rule_id": 15,
+      "from_class": 9,
+      "from_name": "cow",
+      "to_class": 21,
+      "to_name": "animal",
+      "confidence": 1.0,
+      "lift": 2.745917368378886
+    },
+    {
+      "rule_id": 16,
+      "from_class": 11,
+      "from_name": "dog",
+      "to_class": 21,
+      "to_name": "animal",
+      "confidence": 1.0,
+      "lift": 2.745917368378886
+    },
+    {
+      "rule_id": 17,
+      "from_class": 12,
+      "from_name": "horse",
+      "to_class": 21,
+      "to_name": "animal",
+      "confidence": 1.0,
+      "lift": 2.745917368378886
+    },
+    {
+      "rule_id": 18,
+      "from_class": 16,
+      "from_name": "sheep",
+      "to_class": 21,
+      "to_name": "animal",
+      "confidence": 1.0,
+      "lift": 2.745917368378886
+    }
+  ],
+  "exclusion_rules": [
+    {
+      "rule_id": 0,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 2,
+      "name_b": "bird",
+      "cooccurrence_prob": 0.0,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.06909218430519104
+    },
+    {
+      "rule_id": 1,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 4,
+      "name_b": "bottle",
+      "cooccurrence_prob": 0.0,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.06384467333555222
+    },
+    {
+      "rule_id": 2,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 7,
+      "name_b": "cat",
+      "cooccurrence_prob": 0.0,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.09428022056818008
+    },
+    {
+      "rule_id": 3,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 8,
+      "name_b": "chair",
+      "cooccurrence_prob": 0.0,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.09900297224521637
+    },
+    {
+      "rule_id": 4,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 11,
+      "name_b": "dog",
+      "cooccurrence_prob": 0.0,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.1105474904179573
+    },
+    {
+      "rule_id": 5,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 19,
+      "name_b": "tvmonitor",
+      "cooccurrence_prob": 0.0,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.05072590336203575
+    },
+    {
+      "rule_id": 6,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 21,
+      "name_b": "animal",
+      "cooccurrence_prob": 0.0,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.36417701840400696
+    },
+    {
+      "rule_id": 7,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 22,
+      "name_b": "indoor",
+      "cooccurrence_prob": 0.0,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.23823684453964233
+    },
+    {
+      "rule_id": 8,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 4,
+      "name_b": "bottle",
+      "cooccurrence_prob": 0.0001749169168761,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.06384467333555222
+    },
+    {
+      "rule_id": 9,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 6,
+      "name_b": "car",
+      "cooccurrence_prob": 0.0001749169168761,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.10320097953081131
+    },
+    {
+      "rule_id": 10,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 19,
+      "name_b": "tvmonitor",
+      "cooccurrence_prob": 0.0001749169168761,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.05072590336203575
+    },
+    {
+      "rule_id": 11,
+      "class_a": 6,
+      "name_a": "car",
+      "class_b": 19,
+      "name_b": "tvmonitor",
+      "cooccurrence_prob": 0.0001749169168761,
+      "prob_a": 0.10320097953081131,
+      "prob_b": 0.05072590336203575
+    },
+    {
+      "rule_id": 12,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 7,
+      "name_b": "cat",
+      "cooccurrence_prob": 0.0003498338337522,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.09428022056818008
+    },
+    {
+      "rule_id": 13,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 8,
+      "name_b": "chair",
+      "cooccurrence_prob": 0.0003498338337522,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.09900297224521637
+    },
+    {
+      "rule_id": 14,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 11,
+      "name_b": "dog",
+      "cooccurrence_prob": 0.0006996676675044,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.1105474904179573
+    },
+    {
+      "rule_id": 15,
+      "class_a": 6,
+      "name_a": "car",
+      "class_b": 7,
+      "name_b": "cat",
+      "cooccurrence_prob": 0.0006996676675044,
+      "prob_a": 0.10320097953081131,
+      "prob_b": 0.09428022056818008
+    },
+    {
+      "rule_id": 16,
+      "class_a": 19,
+      "name_a": "tvmonitor",
+      "class_b": 20,
+      "name_b": "vehicle",
+      "cooccurrence_prob": 0.0006996676675044,
+      "prob_a": 0.05072590336203575,
+      "prob_b": 0.3484345078468323
+    },
+    {
+      "rule_id": 17,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 20,
+      "name_b": "vehicle",
+      "cooccurrence_prob": 0.0008745845989324152,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.3484345078468323
+    },
+    {
+      "rule_id": 18,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 22,
+      "name_b": "indoor",
+      "cooccurrence_prob": 0.0008745845989324152,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.23823684453964233
+    },
+    {
+      "rule_id": 19,
+      "class_a": 7,
+      "name_a": "cat",
+      "class_b": 20,
+      "name_b": "vehicle",
+      "cooccurrence_prob": 0.0008745845989324152,
+      "prob_a": 0.09428022056818008,
+      "prob_b": 0.3484345078468323
+    },
+    {
+      "rule_id": 20,
+      "class_a": 11,
+      "name_a": "dog",
+      "class_b": 19,
+      "name_b": "tvmonitor",
+      "cooccurrence_prob": 0.0008745845989324152,
+      "prob_a": 0.1105474904179573,
+      "prob_b": 0.05072590336203575
+    },
+    {
+      "rule_id": 21,
+      "class_a": 6,
+      "name_a": "car",
+      "class_b": 8,
+      "name_b": "chair",
+      "cooccurrence_prob": 0.0012244184035807848,
+      "prob_a": 0.10320097953081131,
+      "prob_b": 0.09900297224521637
+    },
+    {
+      "rule_id": 22,
+      "class_a": 4,
+      "name_a": "bottle",
+      "class_b": 7,
+      "name_b": "cat",
+      "cooccurrence_prob": 0.0017491691978648305,
+      "prob_a": 0.06384467333555222,
+      "prob_b": 0.09428022056818008
+    },
+    {
+      "rule_id": 23,
+      "class_a": 4,
+      "name_a": "bottle",
+      "class_b": 6,
+      "name_b": "car",
+      "cooccurrence_prob": 0.001924086012877524,
+      "prob_a": 0.06384467333555222,
+      "prob_b": 0.10320097953081131
+    },
+    {
+      "rule_id": 24,
+      "class_a": 7,
+      "name_a": "cat",
+      "class_b": 19,
+      "name_b": "tvmonitor",
+      "cooccurrence_prob": 0.001924086012877524,
+      "prob_a": 0.09428022056818008,
+      "prob_b": 0.05072590336203575
+    },
+    {
+      "rule_id": 25,
+      "class_a": 0,
+      "name_a": "aeroplane",
+      "class_b": 6,
+      "name_b": "car",
+      "cooccurrence_prob": 0.002273919992148876,
+      "prob_a": 0.05719783157110214,
+      "prob_b": 0.10320097953081131
+    },
+    {
+      "rule_id": 26,
+      "class_a": 4,
+      "name_a": "bottle",
+      "class_b": 11,
+      "name_b": "dog",
+      "cooccurrence_prob": 0.002623753622174263,
+      "prob_a": 0.06384467333555222,
+      "prob_b": 0.1105474904179573
+    },
+    {
+      "rule_id": 27,
+      "class_a": 8,
+      "name_a": "chair",
+      "class_b": 20,
+      "name_b": "vehicle",
+      "cooccurrence_prob": 0.0027986706700176,
+      "prob_a": 0.09900297224521637,
+      "prob_b": 0.3484345078468323
+    },
+    {
+      "rule_id": 28,
+      "class_a": 2,
+      "name_a": "bird",
+      "class_b": 14,
+      "name_b": "person",
+      "cooccurrence_prob": 0.0029735874850302935,
+      "prob_a": 0.06909218430519104,
+      "prob_b": 0.34878432750701904
+    },
+    {
+      "rule_id": 29,
+      "class_a": 6,
+      "name_a": "car",
+      "class_b": 11,
+      "name_b": "dog",
+      "cooccurrence_prob": 0.0029735874850302935,
+      "prob_a": 0.10320097953081131,
+      "prob_b": 0.1105474904179573
+    }
+  ]
+}

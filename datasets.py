@@ -171,7 +171,6 @@ class multilabel:
             split_idx[phase] = split_idx[phase][np.sort(ss_rng.permutation(num_initial)[:num_final])]
             print('final {} set size: {}'.format(phase, len(split_idx[phase])))
         
-        print(f"len of source_data['train']['feats']: {len(source_data['train']['feats'])} , {split_idx['train']}")
         # define train set:
         self.train = ds_multilabel(
             P['dataset'],
